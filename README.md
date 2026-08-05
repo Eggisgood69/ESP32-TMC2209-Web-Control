@@ -2,7 +2,7 @@
 
 基於 ESP32 與 TMC2209 步進馬達驅動器的深色現代化 Web 控制面板。支援動態微步切換、256 微步插值 (Interpolation)、CoolStep 自動電流調節、自動關機計時器以及 OTA 無線更新。
 
-<img width="462" height="791" alt="Image" src="https://github.com/user-attachments/assets/ee1d3842-8bbb-402c-93e6-b7191f6ecd36" />
+<img width="435" height="785" alt="Image" src="https://github.com/user-attachments/assets/a88528cd-4605-487b-bebd-b36988af16f9" />
 
 ---
 

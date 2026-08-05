@@ -2,7 +2,7 @@
 #include <WebServer.h>
 #include <TMCStepper.h>
 #include <FastAccelStepper.h>
-#include "index_html.h" 
+#include "index_html.h" // 引用獨立的網頁檔案
 #include <ArduinoOTA.h>
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -11,7 +11,7 @@ const char* ap_password = "YOUR_WIFI_PASSWORD";
 
 const float RSENSE_VALUE = 0.11f;        // 驅動器感測電阻值 (TMC2209 通常為 0.11)
 const uint8_t DRIVER_ADDRESS = 0;        // UART 設備位址 (MS1, MS2 皆接地或浮空為 0)
-const uint16_t DEFAULT_CURRENT_MA = 500; // 預設運轉電流 (mA)
+const uint16_t DEFAULT_CURRENT_MA = 800; // 預設運轉電流 (mA)
 const int MOTOR_STEPS_PER_REV = 200;     // 馬達每圈步數 (1.8度)
 const float MAX_ALLOWED_RPM = 450.0;     // 最高安全轉速限制
 const uint32_t TPWMTHRS_RPM_THRESHOLD = 150; // 切換至 SpreadCycle 的轉速門檻 (RPM)
@@ -27,10 +27,9 @@ int currentMicrostep = 16, targetDirection = 1, tempHour = 0, tempMin = 0, tempS
 float targetRPM = 60.0;     
 unsigned long timerDuration = 0, timerStartHour = 0;
 bool isRunning = false;
-bool isInterpolationEnabled = true; // 記錄插值狀態
+bool isInterpolationEnabled = true; 
 String plainTempStatus = "🟢 Temp Normal (< 120 deg C)"; 
 
-// --- 用於非同步切換微步的狀態標記 ---
 bool isMicrostepChangePending = false;
 int pendingMicrostep = 16;
 
@@ -38,7 +37,6 @@ void convertStepsToTimeStr(long totalSeconds, String &outStr) {
   int h = totalSeconds / 3600;
   int m = (totalSeconds % 3600) / 60;
   int s = totalSeconds % 60;
-  
   char buffer[32];
   snprintf(buffer, sizeof(buffer), "%dh %dm %ds", h, m, s);
   outStr = buffer; 
@@ -53,9 +51,20 @@ void checkTMC2209Temperature() {
 
 void applySpeedAndRun() {
   if (!stepper) return;
-  float stepsPerSec = (targetRPM / 60.0) * MOTOR_STEPS_PER_REV * currentMicrostep;
-  stepper->setSpeedInHz((uint32_t)stepsPerSec);
-  stepper->setAcceleration((uint32_t)(stepsPerSec * 0.5)); 
+  
+  // 計算每秒需要的脈衝數 (浮點數)
+  float stepsPerSec = (targetRPM / 60.0) * (float)MOTOR_STEPS_PER_REV * (float)currentMicrostep;
+  
+  // 轉為整數 Hz，若大於 0 但算出來是 0，則強制補上最低 1 Hz
+  uint32_t speedHz = (uint32_t)round(stepsPerSec);
+  if (speedHz == 0 && targetRPM > 0.0f) speedHz = 1;
+  
+  // 計算加速度，並確保加速度最低為 1
+  uint32_t accel = (uint32_t)round(stepsPerSec * 0.35);
+  if (accel == 0) accel = 1;
+  
+  stepper->setSpeedInHz(speedHz);
+  stepper->setAcceleration(accel); 
   
   if (isRunning) {
     if (targetDirection == 1) stepper->runForward();
@@ -101,9 +110,10 @@ void handleRoot() {
   page.replace("<div id='action_btn_area'></div>", btnHtml);
   page.replace("<span id='status_box_placeholder'></span>", badgeHtml);
   
-  int rpmInt = (int)targetRPM;
-  page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + String(rpmInt));
-  page.replace("value='60'", "value='" + String(rpmInt) + "'");
+  // 讓 RPM 顯示支援小數點
+  String rpmStr = (targetRPM < 10.0) ? String(targetRPM, 1) : String((int)targetRPM);
+  page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + rpmStr);
+  page.replace("value='60'", "value='" + rpmStr + "'");
   
   server.send(200, "text/html", page); 
 }
@@ -119,18 +129,10 @@ void handleLiveStream() {
     convertStepsToTimeStr(r, t_str);
   }
 
-  // =================【 1. 讀取與計算 TMC2209 診斷狀態 】=================
-  // 檢查插值狀態 (若驅動器有回應或軟體設定成功)
   bool isIntpol = isInterpolationEnabled; 
-  
-  // 檢查 CoolStep 是否啟用
   bool isCoolStep = (driver.semin() > 0); 
-  
-  // 判斷當前轉速是否已超越切換門檻
   String modeStr = (targetRPM >= TPWMTHRS_RPM_THRESHOLD) ? "SpreadCycle" : "StealthChop";
-  // ====================================================================
 
-  // =================【 2. 打包成 JSON 傳給前端 】=================
   client.print("retry: 1000\n");
   client.print("data: {");
   client.print("\"timer\":\"" + t_str + "\",");
@@ -176,8 +178,8 @@ void handleStop() {
   isRunning = false;
   isMicrostepChangePending = false; 
   
-  timerDuration = 0;    // 重設倒數時間
-  timerStartHour = 0;   // 重設起始時間
+  timerDuration = 0;    
+  timerStartHour = 0;   
   
   if (stepper) stepper->stopMove();
   server.send(200, "text/plain", "OK");
@@ -187,36 +189,29 @@ void setup() {
   Serial.begin(115200);
   pinMode(enPin, OUTPUT); digitalWrite(enPin, HIGH); 
   
-  // 初始化 UART2 (RX2: GPIO 16, TX2: GPIO 17)
   Serial2.begin(115200, SERIAL_8N1, 16, 17); 
   delay(200);
 
-  // =================【 TMC2209 初始化與效能優化 】=================
   driver.begin(); 
   driver.toff(4); 
   driver.rms_current(DEFAULT_CURRENT_MA); 
   driver.microsteps(currentMicrostep); 
 
-  // 1. 開啟 256 微步插值
   driver.intpol(true); 
   isInterpolationEnabled = true;
 
-  // 2. 開啟 CoolStep 動態調節
   driver.semin(4); 
   driver.semax(2); 
 
-  // 3. 設定 StealthChop 與 SpreadCycle 自動切換門檻
   driver.en_spreadCycle(false); 
   driver.TPWMTHRS(200); 
 
-  // 4. 測試 UART 連線並印出至 Serial Monitor
   uint8_t result = driver.test_connection();
   if (result == 0) {
     Serial.println("✅ TMC2209 UART 通訊成功！");
   } else {
     Serial.printf("⚠️ TMC2209 UART 回應異常 (代碼: %d)，請檢查接線與 1K 電阻。\n", result);
   }
-  // ===============================================================
 
   engine.init();
   stepper = engine.stepperConnectToPin(stepPin);
@@ -235,7 +230,6 @@ void setup() {
   server.on("/stop", handleStop);
   server.begin();
 
-  // 設定 OTA
   ArduinoOTA.setHostname("ESP32-TMC2209-Control"); 
   ArduinoOTA.setPassword("admin123");              
 
@@ -269,7 +263,6 @@ void loop() {
     }
   }
 
-  // 倒數計時器到期歸零
   if (isRunning && timerDuration > 0 && (millis() - timerStartHour >= timerDuration)) {
     isRunning = false; 
     timerDuration = 0;    
