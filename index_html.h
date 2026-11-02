@@ -127,7 +127,23 @@ document.addEventListener("DOMContentLoaded", function() {
   ['t_h', 't_m', 't_s'].forEach(function(k) {
     if (st[k] > 0) document.getElementById(k).value = st[k];
   });
+  if (st.ma > 0) document.getElementById('ma_input').value = st.ma;
+  if (typeof st.run === 'boolean') document.getElementById('ma_input').disabled = st.run;
 });
+
+function handleCurrentInput(el) {
+  let errEl = document.getElementById('ma_err');
+  let v = parseInt(el.value, 10);
+  if (isNaN(v) || v < 200 || v > 1200) {
+    errEl.innerText = 'Enter a current between 200 and 1200 mA';
+    return;
+  }
+  errEl.innerText = '';
+  var x = new XMLHttpRequest();
+  x.open('GET', '/api?ma=' + v, true);
+  x.onload = function(){ errEl.innerText = (x.status === 200) ? '' : x.responseText; };
+  x.send();
+}
 
 // 限制在 0.1~450；10 RPM 以下保留一位小數，以上取整數
 function normalizeRpm(rpm) {
@@ -218,6 +234,7 @@ if(!!window.EventSource){
     modeEl.innerText = o.mode;
     modeEl.className = "diag-val " + (o.mode === "StealthChop" ? "mode-stealth" : "mode-spread");
     
+    document.getElementById('ma_input').disabled = o.running;
     if(lastState !== null && o.running !== lastState){ location.reload(); }
     lastState = o.running;
   }, false);
@@ -278,6 +295,17 @@ if(!!window.EventSource){
     <input type='number' id='t_m' min='0' placeholder='Min' onchange='send("t_m",this.value)'>
     <input type='number' id='t_s' min='0' placeholder='Sec' onchange='send("t_s",this.value)'>
   </div>
+
+  <hr>
+
+  <span class='label-text'>Motor Current</span>
+  <div class='rpm-input-row' style='margin: 0 0 4px 0;'>
+    <input type='number' id='ma_input' min='200' max='1200' step='50' inputmode='numeric'
+           onchange='handleCurrentInput(this)' onkeydown='if(event.key==="Enter") this.blur()'>
+    <span class='rpm-unit'>mA (RMS)</span>
+  </div>
+  <div id='ma_err' class='rpm-input-err'></div>
+  <div class='fw-ver' style='margin-top: 0;'>About 0.7 &times; motor rated current. Change only while stopped.</div>
 
   <div id='fw_ver' class='fw-ver'></div>
 </div>

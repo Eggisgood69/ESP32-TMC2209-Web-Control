@@ -5,9 +5,10 @@
 #include "index_html.h" // 引用獨立的網頁檔案
 #include <ArduinoOTA.h>
 #include "secrets.h"     // Wi-Fi / OTA 密碼 (不進 Git，範本見 secrets.example.h)
+#include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.3.5";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.4.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -16,7 +17,9 @@ const char* ap_password = SECRET_AP_PASSWORD;   // 定義於 secrets.h
 
 const float RSENSE_VALUE = 0.11f;        // 驅動器感測電阻值 (TMC2209 通常為 0.11)
 const uint8_t DRIVER_ADDRESS = 0;        // UART 設備位址 (MS1, MS2 皆接地或浮空為 0)
-const uint16_t DEFAULT_CURRENT_MA = 800; // 預設運轉電流 (mA)
+const uint16_t DEFAULT_CURRENT_MA = 800; // 預設運轉電流 (mA)，可在網頁上修改並儲存
+const uint16_t MIN_CURRENT_MA = 200;     // 網頁可設定的電流範圍 (RMS)
+const uint16_t MAX_CURRENT_MA = 1200;    // 小型 TMC2209 模組散熱有限，長時間超過約 1.2A 容易過熱
 const int MOTOR_STEPS_PER_REV = 200;     // 馬達每圈步數 (1.8度)
 const float MIN_ALLOWED_RPM = 0.1;       // 最低轉速 (與網頁拉桿下限一致)
 const float MAX_ALLOWED_RPM = 450.0;     // 最高安全轉速限制
@@ -46,6 +49,43 @@ bool isMicrostepChangePending = false;
 int pendingMicrostep = 16;
 bool isSpreadCycle = false;   // 目前設定給驅動器的模式 (en_spreadCycle)
 bool pendingSpread = false;
+
+Preferences prefs;
+uint16_t currentMA = DEFAULT_CURRENT_MA;
+bool isSettingsDirty = false;       // 設定有變更、尚未寫入 Flash
+unsigned long settingsChangedAt = 0;
+
+// 開機時讀回上次儲存的設定；讀到異常值時改用預設值
+void loadSettings() {
+  prefs.begin("motor", true);
+  float rpm = prefs.getFloat("rpm", targetRPM);
+  int dir = prefs.getInt("dir", targetDirection);
+  uint16_t ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
+  prefs.end();
+
+  if (rpm > 0.0f) targetRPM = constrain(rpm, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
+  targetDirection = (dir == -1) ? -1 : 1;
+  currentMA = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
+  Serial.printf("Settings loaded: %.1f RPM, dir %d, %u mA\n", targetRPM, targetDirection, currentMA);
+}
+
+void markSettingsDirty() {
+  isSettingsDirty = true;
+  settingsChangedAt = millis();
+}
+
+// 最後一次變更後 3 秒才寫入，避免拖拉桿或連按 +/- 時頻繁寫 Flash。
+// 只在馬達停止時寫入：寫 Flash 期間程式會短暫停住，運轉中寫入可能讓馬達頓一下
+void saveSettingsIfDue() {
+  if (!isSettingsDirty || millis() - settingsChangedAt < 3000) return;
+  if (stepper && stepper->isRunning()) return;
+  prefs.begin("motor", false);
+  prefs.putFloat("rpm", targetRPM);
+  prefs.putInt("dir", targetDirection);
+  prefs.putUShort("ma", currentMA);
+  prefs.end();
+  isSettingsDirty = false;
+}
 
 void convertStepsToTimeStr(long totalSeconds, String &outStr) {
   int h = totalSeconds / 3600;
@@ -183,9 +223,9 @@ void handleRoot() {
   page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + rpmStr);
 
   // 頁面每次 START/STOP 都會重新整理，把轉向與計時器設定帶回網頁，避免顯示回預設值
-  char stateJson[96];
-  snprintf(stateJson, sizeof(stateJson), "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d}",
-           targetDirection, tempHour, tempMin, tempSec);
+  char stateJson[128];
+  snprintf(stateJson, sizeof(stateJson), "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d,\"ma\":%u,\"run\":%s}",
+           targetDirection, tempHour, tempMin, tempSec, currentMA, isRunning ? "true" : "false");
   page.replace("{/*SERVER_STATE*/}", stateJson);
   
   server.send(200, "text/html", page); 
@@ -277,10 +317,26 @@ bool parseRpmArg() {
 }
 
 void handleAPI() {
+  if (server.hasArg("ma")) {
+    long ma = server.arg("ma").toInt();
+    if (ma < MIN_CURRENT_MA || ma > MAX_CURRENT_MA) {
+      server.send(400, "text/plain", "Current must be " + String(MIN_CURRENT_MA) + "-" + String(MAX_CURRENT_MA) + " mA");
+      return;
+    }
+    // 運轉中突然改變電流可能失步，只允許停止時修改
+    if (isRunning) {
+      server.send(409, "text/plain", "Stop the motor before changing current");
+      return;
+    }
+    currentMA = ma;
+    driver.rms_current(currentMA);
+    markSettingsDirty();
+  }
   if (!parseRpmArg()) {
     server.send(400, "text/plain", "Invalid rpm");
     return;
   }
+  if (server.hasArg("rpm") || server.hasArg("dir")) markSettingsDirty();
   if (server.hasArg("dir")) targetDirection = (server.arg("dir").toInt() == -1) ? -1 : 1;
   if (server.hasArg("t_h")) tempHour = max(0L, server.arg("t_h").toInt());
   if (server.hasArg("t_m")) tempMin = max(0L, server.arg("t_m").toInt());
@@ -302,6 +358,7 @@ void handleStart() {
     server.send(400, "text/plain", "Invalid rpm");
     return;
   }
+  if (server.hasArg("rpm")) markSettingsDirty();
 
   isRunning = true;
   if (stepper) stepper->setCurrentPosition(0);
@@ -329,9 +386,11 @@ void setup() {
   Serial2.begin(115200, SERIAL_8N1, 16, 17); 
   delay(200);
 
-  driver.begin(); 
-  driver.toff(4); 
-  driver.rms_current(DEFAULT_CURRENT_MA); 
+  loadSettings();
+
+  driver.begin();
+  driver.toff(4);
+  driver.rms_current(currentMA);
   driver.microsteps(currentMicrostep); 
 
   driver.intpol(true); 
@@ -355,8 +414,9 @@ void setup() {
   if (stepper != NULL) {
     stepper->setDirectionPin(dirPin);
     stepper->setEnablePin(enPin);
-    stepper->setAutoEnable(true); 
+    stepper->setAutoEnable(true);
     Serial.println("✅ HardDrive engine initialized!");
+    updateMotorParameters();  // 依讀回的轉速先設好微步與模式 (停止狀態，不會啟動)
   }
 
   WiFi.softAP(ap_ssid, ap_password);
@@ -380,8 +440,9 @@ void setup() {
 }
 
 void loop() {
-  ArduinoOTA.handle(); 
+  ArduinoOTA.handle();
   server.handleClient();
+  saveSettingsIfDue();
   
   if (isMicrostepChangePending && stepper != NULL && !stepper->isRunning()) {
     applyDriverMode(pendingMicrostep, pendingSpread);
