@@ -85,6 +85,14 @@ button { width: 100%; padding: 16px; margin: 10px 0; font-size: 17px; font-weigh
 }
 .slider:active::-webkit-slider-thumb { transform: scale(1.15); }
 
+.rpm-input-row { display: flex; align-items: center; justify-content: center; gap: 10px; margin: -10px 0 4px 0; }
+.rpm-input-row input[type='number'] {
+  width: 90px; box-sizing: border-box; padding: 8px 6px; font-size: 16px; font-weight: 600;
+  background: rgba(0, 0, 0, 0.3); color: #ffffff; border: 1px solid var(--border-light); border-radius: 12px;
+  text-align: center; outline: none; transition: 0.25s;
+}
+.rpm-input-row input[type='number']:focus { border-color: var(--accent-cyan); background: rgba(0,0,0,0.5); }
+.rpm-input-err { min-height: 18px; font-size: 13px; color: var(--accent-red); text-align: center; margin-bottom: 14px; }
 .timer-container { display: flex; gap: 8px; width: 100%; box-sizing: border-box; }
 .timer-container input[type='number'] {
   flex: 1 1 0; width: 0; min-width: 0; box-sizing: border-box; padding: 10px 2px;
@@ -111,13 +119,36 @@ var currentRpmVal = 60.0;
 // 【重點修正】：網頁載入時，自動抓取 ESP32 記憶的當前轉速，並同步更新拉桿位置
 document.addEventListener("DOMContentLoaded", function() {
   let savedRpm = parseFloat(document.getElementById("rpm_txt").innerText);
-  if(!isNaN(savedRpm)) {
-    currentRpmVal = savedRpm;
-    // 反向推算非線性拉桿的位置 (0~100)
-    let x = Math.cbrt((currentRpmVal - 0.1) / 449.9);
-    document.getElementById('rpm_slider').value = (x * 100).toFixed(1);
-  }
+  if(!isNaN(savedRpm)) setRpm(savedRpm, false);
 });
+
+// 限制在 0.1~450；10 RPM 以下保留一位小數，以上取整數
+function normalizeRpm(rpm) {
+  rpm = Math.min(450, Math.max(0.1, rpm));
+  return (rpm < 10) ? Math.round(rpm * 10) / 10 : Math.round(rpm);
+}
+
+// 同步更新數字、拉桿位置、輸入框，並視需要送出
+function setRpm(rpm, doSend) {
+  currentRpmVal = normalizeRpm(rpm);
+  // 反向推算非線性拉桿的位置 (0~100)
+  let x = Math.cbrt((currentRpmVal - 0.1) / 449.9);
+  document.getElementById('rpm_slider').value = (x * 100).toFixed(1);
+  document.getElementById('rpm_input').value = currentRpmVal;
+  updateRpmUI(currentRpmVal);
+  if (doSend) send("rpm", currentRpmVal);
+}
+
+function handleRpmInput(el) {
+  let errEl = document.getElementById('rpm_input_err');
+  let v = parseFloat(el.value);
+  if (isNaN(v) || v <= 0) {
+    errEl.innerText = 'Enter a speed between 0.1 and 450';
+    return;
+  }
+  errEl.innerText = '';
+  setRpm(v, true);
+}
 
 function send(p, v){ var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + v, true); x.send(); } 
 
@@ -129,25 +160,17 @@ function setDirection(dir) {
 
 function handleSlider(sliderVal, isChange) {
   let x = parseFloat(sliderVal) / 100.0;
-  currentRpmVal = 0.1 + 449.9 * Math.pow(x, 3);
+  currentRpmVal = normalizeRpm(0.1 + 449.9 * Math.pow(x, 3));
   updateRpmUI(currentRpmVal);
+  document.getElementById('rpm_input').value = currentRpmVal;
   if (isChange) {
-    send("rpm", currentRpmVal.toFixed(1));
+    send("rpm", currentRpmVal);
   }
 }
 
 function tuneRpm(direction) {
   let step = (currentRpmVal < 10) ? 0.1 : 1.0;
-  currentRpmVal += direction * step;
-  
-  if (currentRpmVal < 0.1) currentRpmVal = 0.1;
-  if (currentRpmVal > 450.0) currentRpmVal = 450.0;
-  
-  let x = Math.cbrt((currentRpmVal - 0.1) / 449.9);
-  document.getElementById('rpm_slider').value = (x * 100).toFixed(1);
-  
-  updateRpmUI(currentRpmVal);
-  send("rpm", currentRpmVal.toFixed(1));
+  setRpm(currentRpmVal + direction * step, true);
 }
 
 function updateRpmUI(rpm) {
@@ -230,6 +253,14 @@ if(!!window.EventSource){
            onchange='handleSlider(this.value, true)'>
     <button class='btn-adjust' onclick='tuneRpm(1)'>+</button>
   </div>
+
+  <div class='rpm-input-row'>
+    <span class='rpm-unit'>Set speed</span>
+    <input type='number' id='rpm_input' min='0.1' max='450' step='any' inputmode='decimal'
+           onchange='handleRpmInput(this)' onkeydown='if(event.key==="Enter") this.blur()'>
+    <span class='rpm-unit'>RPM</span>
+  </div>
+  <div id='rpm_input_err' class='rpm-input-err'></div>
 
   <span class='label-text'>Rotation Direction</span>
   <div class='toggle-group'>

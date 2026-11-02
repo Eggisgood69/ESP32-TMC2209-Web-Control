@@ -7,7 +7,7 @@
 #include "secrets.h"     // Wi-Fi / OTA 密碼 (不進 Git，範本見 secrets.example.h)
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.2.2";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.3.3";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -20,7 +20,9 @@ const uint16_t DEFAULT_CURRENT_MA = 800; // 預設運轉電流 (mA)
 const int MOTOR_STEPS_PER_REV = 200;     // 馬達每圈步數 (1.8度)
 const float MIN_ALLOWED_RPM = 0.1;       // 最低轉速 (與網頁拉桿下限一致)
 const float MAX_ALLOWED_RPM = 450.0;     // 最高安全轉速限制
-const uint32_t TPWMTHRS_RPM_THRESHOLD = 150; // 切換至 SpreadCycle 的轉速門檻 (RPM)
+// 超過此轉速改用 1/16 微步 + SpreadCycle (在停止時切換)。
+// 刻意避開常用的 150 RPM：拉桿在 150 附近每格約差 0.6 RPM，界線設在 150 會讓「顯示 150」的轉速時常落到另一側
+const float SPREADCYCLE_RPM_THRESHOLD = 160.0;
 // =====================================================================
 
 WebServer server(80);
@@ -38,9 +40,12 @@ String plainTempStatus = "🟢 Temp Normal (< 120 deg C)";
 int tempLevel = 0;           // 0 = 正常, 1 = 過熱預警, 2 = 故障 (過熱關斷 / UART 斷線)
 bool isDriverFault = false;  // 故障時強制停止並禁止啟動，降溫或通訊恢復後自動解除
 uint8_t uartFailCount = 0;   // 連續 UART 失敗次數，避免單次雜訊誤判
+bool isStealthActive = true; // 驅動器實際模式 (DRV_STATUS bit30)，由溫度檢查一併更新
 
 bool isMicrostepChangePending = false;
 int pendingMicrostep = 16;
+bool isSpreadCycle = false;   // 目前設定給驅動器的模式 (en_spreadCycle)
+bool pendingSpread = false;
 
 void convertStepsToTimeStr(long totalSeconds, String &outStr) {
   int h = totalSeconds / 3600;
@@ -49,6 +54,16 @@ void convertStepsToTimeStr(long totalSeconds, String &outStr) {
   char buffer[32];
   snprintf(buffer, sizeof(buffer), "%dh %dm %ds", h, m, s);
   outStr = buffer; 
+}
+
+// 設定微步與驅動模式。只能在馬達停止時呼叫：
+// 高速運轉中由 SpreadCycle 切回 StealthChop 時，StealthChop 的電流調節尚未適應該轉速，馬達會卡住
+void applyDriverMode(int microstep, bool spread) {
+  currentMicrostep = microstep;
+  isSpreadCycle = spread;
+  driver.microsteps(microstep);
+  driver.en_spreadCycle(spread);
+  delay(10);
 }
 
 void checkTMC2209Temperature() {
@@ -74,6 +89,7 @@ void checkTMC2209Temperature() {
   bool t143 = s & (1UL << 9);
   bool t150 = s & (1UL << 10);
   bool t157 = s & (1UL << 11);
+  isStealthActive = s & (1UL << 30);
 
   if (ot || t150) {
     plainTempStatus = t157 ? "🔴 Thermal Shutdown (> 157 deg C)" : "🔴 Thermal Shutdown (> 150 deg C)";
@@ -120,24 +136,27 @@ void updateMotorParameters() {
   int optimalMicrostep = 16;
   if (targetRPM <= 45.0) {
     optimalMicrostep = 64; 
-  } else if (targetRPM <= 150.0) {
+  } else if (targetRPM <= SPREADCYCLE_RPM_THRESHOLD) {
     optimalMicrostep = 32; 
   } else {
     optimalMicrostep = 16; 
   }
 
-  if (optimalMicrostep != currentMicrostep) {
+  bool wantSpread = targetRPM > SPREADCYCLE_RPM_THRESHOLD;
+
+  if (optimalMicrostep != currentMicrostep || wantSpread != isSpreadCycle) {
     if (isRunning && stepper->isRunning()) {
+      // 運轉中：先減速停止，由 loop() 在停止後套用新設定再重新啟動
       stepper->stopMove();
       pendingMicrostep = optimalMicrostep;
+      pendingSpread = wantSpread;
       isMicrostepChangePending = true;
       return;
-    } else {
-      currentMicrostep = optimalMicrostep;
-      driver.microsteps(currentMicrostep);
-      delay(10);
     }
+    applyDriverMode(optimalMicrostep, wantSpread);
   }
+  // 減速途中又調回原本的區間：取消待切換，直接恢復運轉
+  isMicrostepChangePending = false;
 
   applySpeedAndRun();
 }
@@ -153,7 +172,7 @@ void handleRoot() {
   page.replace("<div id='fw_ver' class='fw-ver'></div>", "<div id='fw_ver' class='fw-ver'>FW " + String(FW_VERSION) + " &middot; " + String(FW_BUILD) + "</div>");
   
   // 讓 RPM 顯示支援小數點
-  String rpmStr = (targetRPM < 10.0) ? String(targetRPM, 1) : String((int)targetRPM);
+  String rpmStr = (targetRPM < 10.0) ? String(targetRPM, 1) : String((int)round(targetRPM));  // 與網頁 JS 的 Math.round 一致
   page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + rpmStr);
   page.replace("value='60'", "value='" + rpmStr + "'");
   
@@ -173,7 +192,7 @@ void handleLiveStream() {
 
   bool isIntpol = isInterpolationEnabled; 
   bool isCoolStep = (driver.semin() > 0); 
-  String modeStr = (targetRPM >= TPWMTHRS_RPM_THRESHOLD) ? "SpreadCycle" : "StealthChop";
+  String modeStr = isStealthActive ? "StealthChop" : "SpreadCycle";
 
   client.print("retry: 1000\n");
   client.print("data: {");
@@ -314,7 +333,7 @@ void setup() {
   driver.semax(2); 
 
   driver.en_spreadCycle(false); 
-  driver.TPWMTHRS(200); 
+  driver.TPWMTHRS(0);  // 關閉晶片依速度自動切換，模式改由 applyDriverMode() 在停止時切換
 
   uint8_t result = driver.test_connection();
   if (result == 0) {
@@ -357,9 +376,7 @@ void loop() {
   server.handleClient();
   
   if (isMicrostepChangePending && stepper != NULL && !stepper->isRunning()) {
-    currentMicrostep = pendingMicrostep;
-    driver.microsteps(currentMicrostep);
-    delay(10); 
+    applyDriverMode(pendingMicrostep, pendingSpread);
     isMicrostepChangePending = false;
     
     if (isRunning) applySpeedAndRun(); 
