@@ -8,7 +8,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.6.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.7.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -26,6 +26,10 @@ const float MAX_ALLOWED_RPM = 450.0;     // 最高安全轉速限制
 // 超過此轉速改用 1/16 微步 + SpreadCycle (在停止時切換)。
 // 刻意避開常用的 150 RPM：拉桿在 150 附近每格約差 0.6 RPM，界線設在 150 會讓「顯示 150」的轉速時常落到另一側
 const float SPREADCYCLE_RPM_THRESHOLD = 160.0;
+// 卡住偵測 (StallGuard4)：只在 StealthChop 且轉速足夠時有效，低速時馬達反電動勢太小、讀值不可靠
+const float STALL_MIN_RPM = 30.0;
+const float STALL_RATIO = 0.35;          // 負載讀值掉到基準值的 35% 以下視為卡住 (數值越大越敏感)
+const uint8_t STALL_CONFIRM_SAMPLES = 3; // 連續 3 次 (約 150 ms) 才判定，避免單次雜訊
 // =====================================================================
 
 WebServer server(80);
@@ -49,6 +53,15 @@ bool isMicrostepChangePending = false;
 int pendingMicrostep = 16;
 bool isSpreadCycle = false;   // 目前設定給驅動器的模式 (en_spreadCycle)
 bool pendingSpread = false;
+
+// 卡住偵測狀態：OFF (轉速範圍外) → WAIT (加速中/取基準) → ARMED (監測中) → STALL (已觸發)
+enum StallState { STALL_OFF, STALL_WAIT, STALL_ARMED, STALL_TRIPPED };
+StallState stallState = STALL_OFF;
+uint16_t sgValue = 0;          // 最新的 SG_RESULT (越小代表負載越重)
+uint16_t sgBaseline = 0;       // 正常運轉時的平均值
+uint32_t sgSum = 0;
+uint8_t sgSamples = 0, sgLowCount = 0;
+unsigned long stallSettleAt = 0;
 
 Preferences prefs;
 uint16_t currentMA = DEFAULT_CURRENT_MA;
@@ -153,8 +166,68 @@ void checkTMC2209Temperature() {
   }
 }
 
+// 轉速或運轉狀態改變時重新取基準 (卡住後保留 STALL 狀態，直到下次按 START)
+void resetStallMonitor() {
+  if (stallState != STALL_TRIPPED) stallState = STALL_OFF;
+  sgBaseline = 0;
+  sgSum = 0;
+  sgSamples = 0;
+  sgLowCount = 0;
+  stallSettleAt = 0;
+}
+
+// 每 50 ms 讀一次 SG_RESULT：到達目標轉速並穩定 1 秒後，取 1 秒平均為基準，之後讀值過低就停機
+void monitorStall() {
+  static unsigned long lastSample = 0;
+  if (millis() - lastSample < 50) return;
+  lastSample = millis();
+
+  if (!stepper || !isRunning || isMicrostepChangePending || stallState == STALL_TRIPPED) return;
+  if (isSpreadCycle || targetRPM < STALL_MIN_RPM) {
+    stallState = STALL_OFF;
+    return;
+  }
+
+  // 等加速完成：實際速度達到目標的 95%
+  float targetHz = (targetRPM / 60.0f) * MOTOR_STEPS_PER_REV * currentMicrostep;
+  float actualHz = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f;
+  if (stallState == STALL_OFF) stallState = STALL_WAIT;
+  if (stallState == STALL_WAIT && sgBaseline == 0) {
+    if (actualHz < targetHz * 0.95f) { stallSettleAt = 0; return; }
+    if (stallSettleAt == 0) { stallSettleAt = millis() + 1000; return; }
+    if (millis() < stallSettleAt) return;
+  }
+
+  sgValue = driver.SG_RESULT();
+  if (driver.CRCerror) return;
+
+  if (stallState == STALL_WAIT) {
+    sgSum += sgValue;
+    if (++sgSamples >= 20) {
+      sgBaseline = max<uint32_t>(sgSum / sgSamples, 1);
+      stallState = STALL_ARMED;
+      Serial.printf("StallGuard armed: baseline %u at %.1f RPM\n", sgBaseline, targetRPM);
+    }
+    return;
+  }
+
+  // ARMED
+  if (sgValue < sgBaseline * STALL_RATIO) {
+    if (++sgLowCount >= STALL_CONFIRM_SAMPLES) {
+      stepper->forceStop();
+      isRunning = false;
+      clearTimer();
+      stallState = STALL_TRIPPED;
+      Serial.printf("⛔ Stall detected: SG %u (baseline %u) -> motor stopped\n", sgValue, sgBaseline);
+    }
+  } else {
+    sgLowCount = 0;
+  }
+}
+
 void applySpeedAndRun() {
   if (!stepper) return;
+  resetStallMonitor();
   
   // 計算每秒需要的脈衝數 (浮點數)
   float stepsPerSec = (targetRPM / 60.0) * (float)MOTOR_STEPS_PER_REV * (float)currentMicrostep;
@@ -252,7 +325,11 @@ void handleStatus() {
   json += "\"running\":" + String(isRunning ? "true" : "false") + ",";
   json += "\"microstep\":" + String(currentMicrostep) + ",";
   json += "\"intpol\":" + String(isInterpolationEnabled ? "true" : "false") + ",";
-  json += "\"mode\":\"" + String(isStealthActive ? "StealthChop" : "SpreadCycle") + "\"";
+  json += "\"mode\":\"" + String(isStealthActive ? "StealthChop" : "SpreadCycle") + "\",";
+  const char* stallNames[] = { "off", "wait", "armed", "stall" };
+  json += "\"stall\":\"" + String(stallNames[stallState]) + "\",";
+  json += "\"sg\":" + String(sgValue) + ",";
+  json += "\"sg_base\":" + String(sgBaseline);
   json += "}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", json);
@@ -373,6 +450,7 @@ void handleStart() {
   }
   if (server.hasArg("rpm")) markSettingsDirty();
 
+  stallState = STALL_OFF;  // 清除上次的卡住狀態
   isRunning = true;
   if (stepper) stepper->setCurrentPosition(0);
   
@@ -385,6 +463,7 @@ void handleStart() {
 void handleStop() {
   isRunning = false;
   isMicrostepChangePending = false;
+  stallState = STALL_OFF;
   clearTimer();
 
   if (stepper) stepper->stopMove();
@@ -456,6 +535,7 @@ void loop() {
   ArduinoOTA.handle();
   server.handleClient();
   saveSettingsIfDue();
+  monitorStall();
   
   if (isMicrostepChangePending && stepper != NULL && !stepper->isRunning()) {
     applyDriverMode(pendingMicrostep, pendingSpread);

@@ -48,7 +48,7 @@ h2 {
 .label-text { font-size: 13px; color: #71717a; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; display: block;}
 
 .diag-grid {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 18px;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px;
 }
 .diag-item {
   background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-light);
@@ -57,6 +57,9 @@ h2 {
 .diag-title { font-size: 10px; color: #71717a; font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
 .diag-val { font-size: 11px; font-weight: 700; }
 .status-on { color: var(--accent-green); }
+.status-wait { color: #ffb703; }
+.status-alarm { color: var(--accent-red); }
+.stall-alert { display: none; background: rgba(255,69,58,0.1); color: var(--accent-red); border: 1px solid rgba(255,69,58,0.5); padding: 10px 12px; border-radius: 14px; font-size: 14px; font-weight: 600; text-align: center; margin-bottom: 12px; }
 .status-off { color: #52525b; }
 .mode-stealth { color: var(--accent-cyan); }
 .mode-spread { color: var(--accent-purple); }
@@ -315,6 +318,23 @@ function applyStatus(o) {
     var modeEl = document.getElementById('diag_mode');
     modeEl.innerText = o.mode;
     modeEl.className = "diag-val " + (o.mode === "StealthChop" ? "mode-stealth" : "mode-spread");
+
+    // 卡住偵測：監測中顯示目前負載讀值相對正常運轉的百分比 (越低代表越吃力)
+    var stallEl = document.getElementById('diag_stall');
+    if (o.stall === 'armed') {
+      stallEl.innerText = 'ON ' + Math.round(o.sg * 100 / Math.max(o.sg_base, 1)) + '%';
+      stallEl.className = 'diag-val status-on';
+    } else if (o.stall === 'wait') {
+      stallEl.innerText = 'CALIBRATING';
+      stallEl.className = 'diag-val status-wait';
+    } else if (o.stall === 'stall') {
+      stallEl.innerText = 'STALLED';
+      stallEl.className = 'diag-val status-alarm';
+    } else {
+      stallEl.innerText = 'OFF';
+      stallEl.className = 'diag-val status-off';
+    }
+    document.getElementById('stall_alert').style.display = (o.stall === 'stall') ? 'block' : 'none';
     
     if (o.running !== lastState) {
       renderRunState(o.running);
@@ -340,7 +360,12 @@ function applyStatus(o) {
       <div class='diag-title'>Drive Mode</div>
       <div id='diag_mode' class='diag-val mode-stealth'>StealthChop</div>
     </div>
+    <div class='diag-item'>
+      <div class='diag-title'>Stall Guard</div>
+      <div id='diag_stall' class='diag-val status-off'>OFF</div>
+    </div>
   </div>
+  <div id='stall_alert' class='stall-alert'>&#9940; Motor stalled and was stopped. Clear the jam, then press START.</div>
   
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box'></span></div>
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Microstep Gear</span><span id='ms_disp' class='ms-badge'>1 / 16</span></div>
