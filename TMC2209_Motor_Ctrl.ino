@@ -8,7 +8,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.4.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.5.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -211,18 +211,13 @@ void clearTimer() {
 void handleRoot() {
   String page = String(INDEX_HTML);
   
-  String btnHtml = isRunning ? "<button class='btn-stop' onclick='triggerAction(\"stop\")'>■ STOP MOTOR</button>" : "<button class='btn-start' onclick='triggerAction(\"start\")'>▶ START MOTOR</button>";
-  String badgeHtml = isRunning ? "<span class='status-badge badge-run'>▶ RUNNING</span>" : "<span class='status-badge badge-stop'>■ STOPPED</span>";
-  
-  page.replace("<div id='action_btn_area'></div>", btnHtml);
-  page.replace("<span id='status_box_placeholder'></span>", badgeHtml);
   page.replace("<div id='fw_ver' class='fw-ver'></div>", "<div id='fw_ver' class='fw-ver'>FW " + String(FW_VERSION) + " &middot; " + String(FW_BUILD) + "</div>");
   
   // 讓 RPM 顯示支援小數點
   String rpmStr = (targetRPM < 10.0) ? String(targetRPM, 1) : String((int)round(targetRPM));  // 與網頁 JS 的 Math.round 一致
   page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + rpmStr);
 
-  // 頁面每次 START/STOP 都會重新整理，把轉向與計時器設定帶回網頁，避免顯示回預設值
+  // 把目前的轉向、計時器、電流與運轉狀態帶給網頁，開啟頁面時直接顯示正確狀態
   char stateJson[128];
   snprintf(stateJson, sizeof(stateJson), "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d,\"ma\":%u,\"run\":%s}",
            targetDirection, tempHour, tempMin, tempSec, currentMA, isRunning ? "true" : "false");
@@ -231,31 +226,27 @@ void handleRoot() {
   server.send(200, "text/html", page); 
 }
 
-void handleLiveStream() {
-  WiFiClient client = server.client();
-  client.println("HTTP/1.1 200 OK\nContent-Type: text/event-stream\nCache-Control: no-cache\nConnection: keep-alive\n");
-  
-  String t_str = "Continuous"; 
+// 即時狀態 (網頁每秒輪詢一次)。
+// 取代原本的 SSE：WebServer 一次只能處理一個連線，SSE 每次送完就斷線重連，瀏覽器會一直出現連線錯誤
+void handleStatus() {
+  String t_str = "Continuous";
   if (timerDuration > 0) {
     long r = isRunning ? ((long)timerDuration - (millis() - timerStartHour)) / 1000 : timerDuration / 1000;
     if (r < 0) r = 0;
     convertStepsToTimeStr(r, t_str);
   }
 
-  bool isIntpol = isInterpolationEnabled; 
-  String modeStr = isStealthActive ? "StealthChop" : "SpreadCycle";
-
-  client.print("retry: 1000\n");
-  client.print("data: {");
-  client.print("\"timer\":\"" + t_str + "\",");
-  client.print("\"temp\":\"" + plainTempStatus + "\",");
-  client.print("\"temp_level\":" + String(tempLevel) + ",");
-  client.print("\"running\":" + String(isRunning ? "true" : "false") + ",");
-  client.print("\"microstep\":" + String(currentMicrostep) + ",");
-  client.print("\"intpol\":" + String(isIntpol ? "true" : "false") + ",");
-  client.print("\"mode\":\"" + modeStr + "\"");
-  client.print("}\n\n");
-  client.flush();
+  String json = "{";
+  json += "\"timer\":\"" + t_str + "\",";
+  json += "\"temp\":\"" + plainTempStatus + "\",";
+  json += "\"temp_level\":" + String(tempLevel) + ",";
+  json += "\"running\":" + String(isRunning ? "true" : "false") + ",";
+  json += "\"microstep\":" + String(currentMicrostep) + ",";
+  json += "\"intpol\":" + String(isInterpolationEnabled ? "true" : "false") + ",";
+  json += "\"mode\":\"" + String(isStealthActive ? "StealthChop" : "SpreadCycle") + "\"";
+  json += "}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
 }
 
 // 診斷頁：顯示 TMC2209 原始暫存器值，用來確認 UART 接線
@@ -422,7 +413,7 @@ void setup() {
   WiFi.softAP(ap_ssid, ap_password);
   server.on("/", handleRoot);
   server.on("/api", handleAPI); 
-  server.on("/live-stream", handleLiveStream); 
+  server.on("/status", handleStatus);
   server.on("/start", handleStart);
   server.on("/stop", handleStop);
   server.on("/diag", handleDiag);

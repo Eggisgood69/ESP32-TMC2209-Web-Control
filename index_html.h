@@ -128,7 +128,8 @@ document.addEventListener("DOMContentLoaded", function() {
     if (st[k] > 0) document.getElementById(k).value = st[k];
   });
   if (st.ma > 0) document.getElementById('ma_input').value = st.ma;
-  if (typeof st.run === 'boolean') document.getElementById('ma_input').disabled = st.run;
+  // 用 ESP32 帶來的狀態先畫出按鈕，不必等第一次輪詢
+  if (typeof st.run === 'boolean') { renderRunState(st.run); lastState = st.run; }
 });
 
 function handleCurrentInput(el) {
@@ -207,18 +208,54 @@ function updateRpmUI(rpm) {
 function triggerAction(action){
   var url = '/' + action;
   if(action === 'start'){
-    url += '?rpm=' + currentRpmVal.toFixed(1);
+    url += '?rpm=' + currentRpmVal;
   }
+  // 先停用按鈕避免連點，收到回應後立即更新狀態 (不重新整理頁面)
+  var btn = document.querySelector('#action_btn_area button');
+  if (btn) btn.disabled = true;
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
-  x.onload = function(){ if(x.status !== 200) alert('Cannot start motor: ' + x.responseText); };
+  x.onload = function(){
+    if(x.status !== 200) alert('Cannot start motor: ' + x.responseText);
+    refreshStatus();
+  };
+  x.onerror = function(){ if (btn) btn.disabled = false; };
   x.send();
 }
 
-if(!!window.EventSource){
-  var s = new EventSource('/live-stream');
-  s.addEventListener('message', function(e){
-    var o = JSON.parse(e.data);
+// 依運轉狀態切換 START/STOP 按鈕與狀態標籤
+function renderRunState(running) {
+  document.getElementById('action_btn_area').innerHTML = running
+    ? "<button class='btn-stop' onclick='triggerAction(\"stop\")'>&#9632; STOP MOTOR</button>"
+    : "<button class='btn-start' onclick='triggerAction(\"start\")'>&#9654; START MOTOR</button>";
+  document.getElementById('status_box').innerHTML = running
+    ? "<span class='status-badge badge-run'>&#9654; RUNNING</span>"
+    : "<span class='status-badge badge-stop'>&#9632; STOPPED</span>";
+  document.getElementById('ma_input').disabled = running;
+}
+
+// 每秒輪詢 /status；上一個請求還沒回來就跳過，避免請求堆積
+var statusInFlight = false;
+function refreshStatus() {
+  if (statusInFlight) return;
+  statusInFlight = true;
+  fetch('/status', { cache: 'no-store' })
+    .then(function(r){ return r.json(); })
+    .then(applyStatus)
+    .catch(function(){
+      var tempEl = document.getElementById('temp_disp');
+      tempEl.innerText = '⚪ Connection lost, retrying...';
+      tempEl.className = 'temp-box temp-fault';
+    })
+    .finally(function(){ statusInFlight = false; });
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  refreshStatus();
+  setInterval(refreshStatus, 1000);
+});
+
+function applyStatus(o) {
     document.getElementById('t_disp').innerText = o.timer;
     var tempEl = document.getElementById('temp_disp');
     tempEl.innerText = o.temp;
@@ -234,10 +271,14 @@ if(!!window.EventSource){
     modeEl.innerText = o.mode;
     modeEl.className = "diag-val " + (o.mode === "StealthChop" ? "mode-stealth" : "mode-spread");
     
-    document.getElementById('ma_input').disabled = o.running;
-    if(lastState !== null && o.running !== lastState){ location.reload(); }
+    if (o.running !== lastState) {
+      renderRunState(o.running);
+      // 停止時 ESP32 會清除計時器，畫面上的時/分/秒也一起清空
+      if (lastState === true && !o.running) {
+        ['t_h', 't_m', 't_s'].forEach(function(k){ document.getElementById(k).value = ''; });
+      }
+    }
     lastState = o.running;
-  }, false);
 }
 </script></head><body>
 
@@ -256,7 +297,7 @@ if(!!window.EventSource){
     </div>
   </div>
   
-  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box_placeholder'></span></div>
+  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box'></span></div>
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Microstep Gear</span><span id='ms_disp' class='ms-badge'>1 / 16</span></div>
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Timer Remaining</span><span id='t_disp' style='color:#ffb703; font-weight:600;'>Continuous</span></div>
 
