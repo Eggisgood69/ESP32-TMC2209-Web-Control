@@ -59,6 +59,9 @@ h2 {
 .status-on { color: var(--accent-green); }
 .status-wait { color: #ffb703; }
 .status-alarm { color: var(--accent-red); }
+.wiring-alert { display: none; padding: 10px 12px; border-radius: 14px; font-size: 14px; font-weight: 600; text-align: center; margin-bottom: 12px; }
+.wiring-alert.warn { display: block; background: rgba(255,183,3,0.1); color: #ffb703; border: 1px solid rgba(255,183,3,0.45); }
+.wiring-alert.fault { display: block; background: rgba(255,69,58,0.1); color: var(--accent-red); border: 1px solid rgba(255,69,58,0.5); }
 .stall-alert { display: none; background: rgba(255,69,58,0.1); color: var(--accent-red); border: 1px solid rgba(255,69,58,0.5); padding: 10px 12px; border-radius: 14px; font-size: 14px; font-weight: 600; text-align: center; margin-bottom: 12px; }
 .status-off { color: #52525b; }
 .mode-stealth { color: var(--accent-cyan); }
@@ -335,6 +338,11 @@ function applyStatus(o) {
       stallEl.className = 'diag-val status-off';
     }
     document.getElementById('stall_alert').style.display = (o.stall === 'stall') ? 'block' : 'none';
+
+    // 接線警告：1 = 疑似線圈開路 (黃)，2 = 短路 (紅，已停機)
+    var wEl = document.getElementById('wiring_alert');
+    wEl.innerText = o.wiring ? ((o.wiring_level === 2 ? '⛔ ' : '⚠️ ') + o.wiring) : '';
+    wEl.className = 'wiring-alert' + (o.wiring_level === 2 ? ' fault' : o.wiring_level === 1 ? ' warn' : '');
     
     if (o.running !== lastState) {
       renderRunState(o.running);
@@ -365,6 +373,7 @@ function applyStatus(o) {
       <div id='diag_stall' class='diag-val status-off'>OFF</div>
     </div>
   </div>
+  <div id='wiring_alert' class='wiring-alert'></div>
   <div id='stall_alert' class='stall-alert'>&#9940; Motor stalled and was stopped. Clear the jam, then press START.</div>
   
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box'></span></div>

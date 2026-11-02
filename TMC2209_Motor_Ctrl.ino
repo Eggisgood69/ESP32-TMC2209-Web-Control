@@ -8,7 +8,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.7.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.8.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -46,6 +46,9 @@ bool isInterpolationEnabled = true;
 String plainTempStatus = "🟢 Temp Normal (< 120 deg C)";
 int tempLevel = 0;           // 0 = 正常, 1 = 過熱預警, 2 = 故障 (過熱關斷 / UART 斷線)
 bool isDriverFault = false;  // 故障時強制停止並禁止啟動，降溫或通訊恢復後自動解除
+String faultMessage = "";    // 故障原因 (啟動被拒時回傳給網頁)
+String wiringAlert = "";     // 接線警告文字，空字串代表正常
+int wiringLevel = 0;         // 0 = 正常, 1 = 疑似開路 (只警告), 2 = 短路 (停機)
 uint8_t uartFailCount = 0;   // 連續 UART 失敗次數，避免單次雜訊誤判
 bool isStealthActive = true; // 驅動器實際模式 (DRV_STATUS bit30)，由溫度檢查一併更新
 
@@ -136,6 +139,7 @@ void checkTMC2209Temperature() {
       plainTempStatus = "⚪ Driver UART Error (temp unknown)";
       tempLevel = 2;
       isDriverFault = true;
+      faultMessage = plainTempStatus;
     }
     return;
   }
@@ -151,19 +155,55 @@ void checkTMC2209Temperature() {
   bool t157 = s & (1UL << 11);
   isStealthActive = s & (1UL << 30);
 
+  bool thermalFault = false;
   if (ot || t150) {
     plainTempStatus = t157 ? "🔴 Thermal Shutdown (> 157 deg C)" : "🔴 Thermal Shutdown (> 150 deg C)";
     tempLevel = 2;
-    isDriverFault = true;
+    thermalFault = true;
   } else if (otpw || t120) {
     plainTempStatus = t143 ? "🟡 Driver Overheat (> 143 deg C)" : "🟡 Driver Overheat (> 120 deg C)";
     tempLevel = 1;
-    isDriverFault = false;
   } else {
     plainTempStatus = "🟢 Temp Normal (< 120 deg C)";
     tempLevel = 0;
-    isDriverFault = false;
   }
+
+  // 接線檢查 — bit2/3 s2ga/s2gb：線圈對地短路，bit4/5 s2vsa/s2vsb：線圈對電源短路 (低側)，
+  // bit6/7 ola/olb：線圈開路。短路時驅動器會自行關閉輸出，旗標在下次重新致能 (按 START) 時清除
+  bool shortA = s & ((1UL << 2) | (1UL << 4));
+  bool shortB = s & ((1UL << 3) | (1UL << 5));
+  bool openA = s & (1UL << 6);
+  bool openB = s & (1UL << 7);
+
+  // 開路旗標在高速與靜止時可能誤報 (datasheet 建議只在慢速運轉時參考)，
+  // 所以只在等速運轉、StealthChop 區間內判斷，並需連續 3 秒才警告
+  static uint8_t openCount = 0;
+  bool atSpeed = false;
+  if (stepper && isRunning && !isMicrostepChangePending && !isSpreadCycle) {
+    float targetHz = (targetRPM / 60.0f) * MOTOR_STEPS_PER_REV * currentMicrostep;
+    atSpeed = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f >= targetHz * 0.95f;
+  }
+  if (atSpeed && (openA || openB)) {
+    if (openCount < 255) openCount++;
+  } else if (!isRunning || atSpeed) {
+    openCount = 0;
+  }
+
+  if (shortA || shortB) {
+    wiringAlert = String("Short circuit on motor coil ") + (shortA && shortB ? "A and B" : shortA ? "A" : "B") +
+                  ". Power off and check the motor wiring.";
+    wiringLevel = 2;
+  } else if (openCount >= 3) {
+    wiringAlert = String("Motor coil ") + (openA && openB ? "A and B" : openA ? "A" : "B") +
+                  " seems disconnected. Power off and check the motor cable.";
+    wiringLevel = 1;
+  } else if (!isRunning || atSpeed) {
+    wiringAlert = "";
+    wiringLevel = 0;
+  }
+
+  isDriverFault = thermalFault || wiringLevel == 2;
+  faultMessage = thermalFault ? plainTempStatus : wiringAlert;
 }
 
 // 轉速或運轉狀態改變時重新取基準 (卡住後保留 STALL 狀態，直到下次按 START)
@@ -329,7 +369,9 @@ void handleStatus() {
   const char* stallNames[] = { "off", "wait", "armed", "stall" };
   json += "\"stall\":\"" + String(stallNames[stallState]) + "\",";
   json += "\"sg\":" + String(sgValue) + ",";
-  json += "\"sg_base\":" + String(sgBaseline);
+  json += "\"sg_base\":" + String(sgBaseline) + ",";
+  json += "\"wiring\":\"" + wiringAlert + "\",";
+  json += "\"wiring_level\":" + String(wiringLevel);
   json += "}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", json);
@@ -441,7 +483,7 @@ void handleAPI() {
 
 void handleStart() {
   if (isDriverFault) {
-    server.send(503, "text/plain", plainTempStatus);
+    server.send(503, "text/plain", faultMessage);
     return;
   }
   if (!parseRpmArg()) {
@@ -552,7 +594,7 @@ void loop() {
       isRunning = false;
       isMicrostepChangePending = false;
       if (stepper) stepper->stopMove();
-      Serial.println("⛔ " + plainTempStatus + " -> motor stopped");
+      Serial.println("⛔ " + faultMessage + " -> motor stopped");
     }
   }
 
