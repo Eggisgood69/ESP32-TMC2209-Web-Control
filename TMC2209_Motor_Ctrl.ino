@@ -7,7 +7,7 @@
 #include "secrets.h"     // Wi-Fi / OTA 密碼 (不進 Git，範本見 secrets.example.h)
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.2.1";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.2.2";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -18,6 +18,7 @@ const float RSENSE_VALUE = 0.11f;        // 驅動器感測電阻值 (TMC2209 �
 const uint8_t DRIVER_ADDRESS = 0;        // UART 設備位址 (MS1, MS2 皆接地或浮空為 0)
 const uint16_t DEFAULT_CURRENT_MA = 800; // 預設運轉電流 (mA)
 const int MOTOR_STEPS_PER_REV = 200;     // 馬達每圈步數 (1.8度)
+const float MIN_ALLOWED_RPM = 0.1;       // 最低轉速 (與網頁拉桿下限一致)
 const float MAX_ALLOWED_RPM = 450.0;     // 最高安全轉速限制
 const uint32_t TPWMTHRS_RPM_THRESHOLD = 150; // 切換至 SpreadCycle 的轉速門檻 (RPM)
 // =====================================================================
@@ -114,7 +115,7 @@ void applySpeedAndRun() {
 
 void updateMotorParameters() {
   if (!stepper) return;
-  if (targetRPM > MAX_ALLOWED_RPM) targetRPM = MAX_ALLOWED_RPM;
+  targetRPM = constrain(targetRPM, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
 
   int optimalMicrostep = 16;
   if (targetRPM <= 45.0) {
@@ -237,8 +238,20 @@ void handleDiag() {
   server.send(200, "text/plain", out);
 }
 
+// 讀取 rpm 參數：非數字、0 或負數視為無效並保留原值，其餘限制在 MIN~MAX 之間
+bool parseRpmArg() {
+  if (!server.hasArg("rpm")) return true;
+  float v = server.arg("rpm").toFloat();
+  if (!(v > 0.0f)) return false;  // toFloat() 解析失敗時回傳 0；NaN 也會在這裡被擋下
+  targetRPM = constrain(v, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
+  return true;
+}
+
 void handleAPI() {
-  if (server.hasArg("rpm")) targetRPM = server.arg("rpm").toFloat();
+  if (!parseRpmArg()) {
+    server.send(400, "text/plain", "Invalid rpm");
+    return;
+  }
   if (server.hasArg("dir")) targetDirection = server.arg("dir").toInt();
   if (server.hasArg("t_h")) tempHour = server.arg("t_h").toInt();
   if (server.hasArg("t_m")) tempMin = server.arg("t_m").toInt();
@@ -256,10 +269,11 @@ void handleStart() {
     server.send(503, "text/plain", plainTempStatus);
     return;
   }
-  if (server.hasArg("rpm")) {
-    targetRPM = server.arg("rpm").toFloat();
+  if (!parseRpmArg()) {
+    server.send(400, "text/plain", "Invalid rpm");
+    return;
   }
-  
+
   isRunning = true;
   if (stepper) stepper->setCurrentPosition(0);
   
