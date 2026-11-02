@@ -8,7 +8,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.5.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.6.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -52,6 +52,8 @@ bool pendingSpread = false;
 
 Preferences prefs;
 uint16_t currentMA = DEFAULT_CURRENT_MA;
+const int PRESET_COUNT = 3;
+float presetRpm[PRESET_COUNT] = { 30.0, 60.0, 150.0 };  // 常用轉速快捷鍵 (網頁長按可改)
 bool isSettingsDirty = false;       // 設定有變更、尚未寫入 Flash
 unsigned long settingsChangedAt = 0;
 
@@ -61,6 +63,10 @@ void loadSettings() {
   float rpm = prefs.getFloat("rpm", targetRPM);
   int dir = prefs.getInt("dir", targetDirection);
   uint16_t ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
+  for (int i = 0; i < PRESET_COUNT; i++) {
+    float p = prefs.getFloat(("p" + String(i)).c_str(), presetRpm[i]);
+    if (p > 0.0f) presetRpm[i] = constrain(p, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
+  }
   prefs.end();
 
   if (rpm > 0.0f) targetRPM = constrain(rpm, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
@@ -83,6 +89,7 @@ void saveSettingsIfDue() {
   prefs.putFloat("rpm", targetRPM);
   prefs.putInt("dir", targetDirection);
   prefs.putUShort("ma", currentMA);
+  for (int i = 0; i < PRESET_COUNT; i++) prefs.putFloat(("p" + String(i)).c_str(), presetRpm[i]);
   prefs.end();
   isSettingsDirty = false;
 }
@@ -218,9 +225,11 @@ void handleRoot() {
   page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + rpmStr);
 
   // 把目前的轉向、計時器、電流與運轉狀態帶給網頁，開啟頁面時直接顯示正確狀態
-  char stateJson[128];
-  snprintf(stateJson, sizeof(stateJson), "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d,\"ma\":%u,\"run\":%s}",
-           targetDirection, tempHour, tempMin, tempSec, currentMA, isRunning ? "true" : "false");
+  char stateJson[192];
+  snprintf(stateJson, sizeof(stateJson),
+           "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d,\"ma\":%u,\"run\":%s,\"presets\":[%g,%g,%g]}",
+           targetDirection, tempHour, tempMin, tempSec, currentMA, isRunning ? "true" : "false",
+           presetRpm[0], presetRpm[1], presetRpm[2]);
   page.replace("{/*SERVER_STATE*/}", stateJson);
   
   server.send(200, "text/html", page); 
@@ -308,6 +317,19 @@ bool parseRpmArg() {
 }
 
 void handleAPI() {
+  // 儲存快捷鍵：/api?preset=0&set=150
+  if (server.hasArg("preset")) {
+    int i = server.arg("preset").toInt();
+    float v = server.arg("set").toFloat();
+    if (i < 0 || i >= PRESET_COUNT || !(v > 0.0f)) {
+      server.send(400, "text/plain", "Invalid preset");
+      return;
+    }
+    presetRpm[i] = constrain(v, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
+    markSettingsDirty();
+    server.send(200, "text/plain", String(presetRpm[i], 1));
+    return;
+  }
   if (server.hasArg("ma")) {
     long ma = server.arg("ma").toInt();
     if (ma < MIN_CURRENT_MA || ma > MAX_CURRENT_MA) {

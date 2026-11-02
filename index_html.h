@@ -92,6 +92,13 @@ button { width: 100%; padding: 16px; margin: 10px 0; font-size: 17px; font-weigh
   text-align: center; outline: none; transition: 0.25s;
 }
 .rpm-input-row input[type='number']:focus { border-color: var(--accent-cyan); background: rgba(0,0,0,0.5); }
+.preset-row { display: flex; gap: 8px; }
+.preset-btn {
+  flex: 1; margin: 0; padding: 10px 0; font-size: 15px; font-weight: 600; border-radius: 12px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(0,242,254,0.25); color: var(--accent-cyan);
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
+}
+.preset-btn:active { background: rgba(0, 242, 254, 0.2); transform: scale(0.97); }
 .rpm-input-err { min-height: 18px; font-size: 13px; color: var(--accent-red); text-align: center; margin-bottom: 14px; }
 .timer-container { display: flex; gap: 8px; width: 100%; box-sizing: border-box; }
 .timer-container input[type='number'] {
@@ -128,9 +135,47 @@ document.addEventListener("DOMContentLoaded", function() {
     if (st[k] > 0) document.getElementById(k).value = st[k];
   });
   if (st.ma > 0) document.getElementById('ma_input').value = st.ma;
+  if (Array.isArray(st.presets)) st.presets.forEach(function(v, i){ setPresetLabel(i, v); });
   // 用 ESP32 帶來的狀態先畫出按鈕，不必等第一次輪詢
   if (typeof st.run === 'boolean') { renderRunState(st.run); lastState = st.run; }
 });
+
+// 常用轉速快捷鍵：點一下套用，長按 0.7 秒把目前轉速存進這個按鈕
+var presetVals = [30, 60, 150];
+var presetTimer = null, presetLongPressed = false;
+
+function setPresetLabel(i, v) {
+  presetVals[i] = v;
+  document.getElementById('preset_' + i).innerText = (v < 10) ? Number(v).toFixed(1) : Math.round(v);
+}
+
+function presetDown(i) {
+  presetLongPressed = false;
+  presetTimer = setTimeout(function() {
+    presetLongPressed = true;
+    var v = currentRpmVal;
+    var x = new XMLHttpRequest();
+    x.open('GET', '/api?preset=' + i + '&set=' + v, true);
+    x.onload = function() {
+      var hint = document.getElementById('preset_hint');
+      if (x.status === 200) {
+        setPresetLabel(i, v);
+        hint.innerText = 'Saved ' + document.getElementById('preset_' + i).innerText + ' RPM to this button';
+      } else {
+        hint.innerText = x.responseText;
+      }
+      setTimeout(function(){ hint.innerText = 'Tap to apply · Long-press to save current speed'; }, 2000);
+    };
+    x.send();
+  }, 700);
+}
+
+function presetUp(i) {
+  clearTimeout(presetTimer);
+  if (!presetLongPressed) setRpm(presetVals[i], true);
+}
+
+function presetCancel() { clearTimeout(presetTimer); presetLongPressed = true; }
 
 function handleCurrentInput(el) {
   let errEl = document.getElementById('ma_err');
@@ -323,6 +368,13 @@ function applyStatus(o) {
     <span class='rpm-unit'>RPM</span>
   </div>
   <div id='rpm_input_err' class='rpm-input-err'></div>
+
+  <div class='preset-row'>
+    <button id='preset_0' class='preset-btn' onpointerdown='presetDown(0)' onpointerup='presetUp(0)' onpointerleave='presetCancel()' oncontextmenu='return false'>30</button>
+    <button id='preset_1' class='preset-btn' onpointerdown='presetDown(1)' onpointerup='presetUp(1)' onpointerleave='presetCancel()' oncontextmenu='return false'>60</button>
+    <button id='preset_2' class='preset-btn' onpointerdown='presetDown(2)' onpointerup='presetUp(2)' onpointerleave='presetCancel()' oncontextmenu='return false'>150</button>
+  </div>
+  <div id='preset_hint' class='fw-ver' style='margin: 4px 0 18px 0;'>Tap to apply · Long-press to save current speed</div>
 
   <span class='label-text'>Rotation Direction</span>
   <div class='toggle-group'>
