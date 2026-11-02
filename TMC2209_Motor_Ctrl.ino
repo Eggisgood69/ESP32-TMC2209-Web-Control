@@ -4,10 +4,15 @@
 #include <FastAccelStepper.h>
 #include "index_html.h" // 引用獨立的網頁檔案
 #include <ArduinoOTA.h>
+#include "secrets.h"     // Wi-Fi / OTA 密碼 (不進 Git，範本見 secrets.example.h)
+
+// =================【 韌體版本 】=================
+const char* FW_VERSION = "v1.1.0";       // 每次更新韌體時請遞增
+const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
 const char* ap_ssid     = "TMC2209_Motor_Ctrl"; 
-const char* ap_password = "YOUR_WIFI_PASSWORD";           
+const char* ap_password = SECRET_AP_PASSWORD;   // 定義於 secrets.h
 
 const float RSENSE_VALUE = 0.11f;        // 驅動器感測電阻值 (TMC2209 通常為 0.11)
 const uint8_t DRIVER_ADDRESS = 0;        // UART 設備位址 (MS1, MS2 皆接地或浮空為 0)
@@ -60,7 +65,7 @@ void applySpeedAndRun() {
   if (speedHz == 0 && targetRPM > 0.0f) speedHz = 1;
   
   // 計算加速度，並確保加速度最低為 1
-  uint32_t accel = (uint32_t)round(stepsPerSec * 0.35);
+  uint32_t accel = (uint32_t)round(stepsPerSec * 0.2);
   if (accel == 0) accel = 1;
   
   stepper->setSpeedInHz(speedHz);
@@ -109,6 +114,7 @@ void handleRoot() {
   
   page.replace("<div id='action_btn_area'></div>", btnHtml);
   page.replace("<span id='status_box_placeholder'></span>", badgeHtml);
+  page.replace("<div id='fw_ver' class='fw-ver'></div>", "<div id='fw_ver' class='fw-ver'>FW " + String(FW_VERSION) + " &middot; " + String(FW_BUILD) + "</div>");
   
   // 讓 RPM 顯示支援小數點
   String rpmStr = (targetRPM < 10.0) ? String(targetRPM, 1) : String((int)targetRPM);
@@ -187,6 +193,7 @@ void handleStop() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.printf("TMC2209 Motor Ctrl %s (build %s)\n", FW_VERSION, FW_BUILD);
   pinMode(enPin, OUTPUT); digitalWrite(enPin, HIGH); 
   
   Serial2.begin(115200, SERIAL_8N1, 16, 17); 
@@ -231,7 +238,7 @@ void setup() {
   server.begin();
 
   ArduinoOTA.setHostname("ESP32-TMC2209-Control"); 
-  ArduinoOTA.setPassword("admin123");              
+  ArduinoOTA.setPassword(SECRET_OTA_PASSWORD);              
 
   ArduinoOTA.onStart([]() {
     if (stepper) stepper->stopMove();

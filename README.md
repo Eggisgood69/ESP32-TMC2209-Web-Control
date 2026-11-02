@@ -48,4 +48,6 @@
 
 1. 下載或 Clone 本專案至本地資料夾：
    ```bash
-   git clone [https://github.com/your-username/TMC2209-ESP32-Web-Control.git](https://github.com/your-username/TMC2209-ESP32-Web-Control.git)
+   git clone https://github.com/your-username/TMC2209-ESP32-Web-Control.git
+   ```
+2. 將 `secrets.example.h` 複製為 `secrets.h`，填入 Wi-Fi 熱點密碼（至少 8 字元）與 OTA 密碼。`secrets.h` 已列入 `.gitignore`，不會被 commit。

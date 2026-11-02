@@ -99,6 +99,7 @@ button { width: 100%; padding: 16px; margin: 10px 0; font-size: 17px; font-weigh
 .temp-box { background: rgba(255,255,255,0.02); color: var(--accent-green); padding: 12px; border-radius: 16px; font-size: 14px; font-weight: 600; text-align: center; border: 1px solid rgba(46,213,83,0.2); margin-bottom: 15px; }
 .ms-badge { background: rgba(255,255,255,0.05); color: var(--accent-cyan); border: 1px solid rgba(0,242,254,0.2); padding: 2px 10px; border-radius: 8px; font-size: 13px; }
 hr { border: 0; border-top: 1px solid var(--border-light); margin: 20px 0; }
+.fw-ver { font-size: 11px; color: #52525b; text-align: center; margin-top: 18px; }
 </style>
 
 <script>
@@ -237,6 +238,8 @@ if(!!window.EventSource){
     <input type='number' placeholder='Min' onchange='send("t_m",this.value)'>
     <input type='number' placeholder='Sec' onchange='send("t_s",this.value)'>
   </div>
+
+  <div id='fw_ver' class='fw-ver'></div>
 </div>
 
 </body></html>
