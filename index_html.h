@@ -120,6 +120,13 @@ var currentRpmVal = 60.0;
 document.addEventListener("DOMContentLoaded", function() {
   let savedRpm = parseFloat(document.getElementById("rpm_txt").innerText);
   if(!isNaN(savedRpm)) setRpm(savedRpm, false);
+
+  // 還原 ESP32 記憶的轉向與計時器設定 (由 handleRoot 填入)
+  var st = {/*SERVER_STATE*/};
+  if (st.dir === 1 || st.dir === -1) showDirection(st.dir);
+  ['t_h', 't_m', 't_s'].forEach(function(k) {
+    if (st[k] > 0) document.getElementById(k).value = st[k];
+  });
 });
 
 // 限制在 0.1~450；10 RPM 以下保留一位小數，以上取整數
@@ -152,9 +159,13 @@ function handleRpmInput(el) {
 
 function send(p, v){ var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + v, true); x.send(); } 
 
-function setDirection(dir) {
+function showDirection(dir) {
   document.getElementById('btn_cw').classList.toggle('active', dir === 1);
   document.getElementById('btn_ccw').classList.toggle('active', dir === -1);
+}
+
+function setDirection(dir) {
+  showDirection(dir);
   send('dir', dir);
 }
 
@@ -270,9 +281,9 @@ if(!!window.EventSource){
 
   <span class='label-text'>Auto Shutdown Timer</span>
   <div class='timer-container'>
-    <input type='number' placeholder='Hr' onchange='send("t_h",this.value)'>
-    <input type='number' placeholder='Min' onchange='send("t_m",this.value)'>
-    <input type='number' placeholder='Sec' onchange='send("t_s",this.value)'>
+    <input type='number' id='t_h' min='0' placeholder='Hr' onchange='send("t_h",this.value)'>
+    <input type='number' id='t_m' min='0' placeholder='Min' onchange='send("t_m",this.value)'>
+    <input type='number' id='t_s' min='0' placeholder='Sec' onchange='send("t_s",this.value)'>
   </div>
 
   <div id='fw_ver' class='fw-ver'></div>

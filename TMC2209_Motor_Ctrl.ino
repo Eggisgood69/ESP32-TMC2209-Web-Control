@@ -7,7 +7,7 @@
 #include "secrets.h"     // Wi-Fi / OTA 密碼 (不進 Git，範本見 secrets.example.h)
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.3.3";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.3.4";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -161,6 +161,13 @@ void updateMotorParameters() {
   applySpeedAndRun();
 }
 
+// 停止或計時結束時清除計時器，連同時/分/秒一起歸零，避免下次只改一欄時混入舊值
+void clearTimer() {
+  timerDuration = 0;
+  timerStartHour = 0;
+  tempHour = tempMin = tempSec = 0;
+}
+
 void handleRoot() {
   String page = String(INDEX_HTML);
   
@@ -174,7 +181,12 @@ void handleRoot() {
   // 讓 RPM 顯示支援小數點
   String rpmStr = (targetRPM < 10.0) ? String(targetRPM, 1) : String((int)round(targetRPM));  // 與網頁 JS 的 Math.round 一致
   page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + rpmStr);
-  page.replace("value='60'", "value='" + rpmStr + "'");
+
+  // 頁面每次 START/STOP 都會重新整理，把轉向與計時器設定帶回網頁，避免顯示回預設值
+  char stateJson[96];
+  snprintf(stateJson, sizeof(stateJson), "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d}",
+           targetDirection, tempHour, tempMin, tempSec);
+  page.replace("{/*SERVER_STATE*/}", stateJson);
   
   server.send(200, "text/html", page); 
 }
@@ -271,10 +283,10 @@ void handleAPI() {
     server.send(400, "text/plain", "Invalid rpm");
     return;
   }
-  if (server.hasArg("dir")) targetDirection = server.arg("dir").toInt();
-  if (server.hasArg("t_h")) tempHour = server.arg("t_h").toInt();
-  if (server.hasArg("t_m")) tempMin = server.arg("t_m").toInt();
-  if (server.hasArg("t_s")) tempSec = server.arg("t_s").toInt();
+  if (server.hasArg("dir")) targetDirection = (server.arg("dir").toInt() == -1) ? -1 : 1;
+  if (server.hasArg("t_h")) tempHour = max(0L, server.arg("t_h").toInt());
+  if (server.hasArg("t_m")) tempMin = max(0L, server.arg("t_m").toInt());
+  if (server.hasArg("t_s")) tempSec = max(0L, server.arg("t_s").toInt());
   if (server.hasArg("t_h") || server.hasArg("t_m") || server.hasArg("t_s")) {
     timerDuration = (unsigned long)(tempHour * 3600 + tempMin * 60 + tempSec) * 1000;
     if (isRunning && timerDuration > 0) timerStartHour = millis();
@@ -304,11 +316,9 @@ void handleStart() {
 
 void handleStop() {
   isRunning = false;
-  isMicrostepChangePending = false; 
-  
-  timerDuration = 0;    
-  timerStartHour = 0;   
-  
+  isMicrostepChangePending = false;
+  clearTimer();
+
   if (stepper) stepper->stopMove();
   server.send(200, "text/plain", "OK");
 }
@@ -395,9 +405,8 @@ void loop() {
   }
 
   if (isRunning && timerDuration > 0 && (millis() - timerStartHour >= timerDuration)) {
-    isRunning = false; 
-    timerDuration = 0;    
-    timerStartHour = 0;   
+    isRunning = false;
+    clearTimer();
     if (stepper) stepper->stopMove();
   }
 }
