@@ -97,6 +97,8 @@ button { width: 100%; padding: 16px; margin: 10px 0; font-size: 17px; font-weigh
 .badge-run { background: rgba(46, 213, 83, 0.15); color: var(--accent-green); border: 1px solid rgba(46, 213, 83, 0.3); }
 .badge-stop { background: rgba(255, 69, 58, 0.15); color: var(--accent-red); border: 1px solid rgba(255, 69, 58, 0.3); }
 .temp-box { background: rgba(255,255,255,0.02); color: var(--accent-green); padding: 12px; border-radius: 16px; font-size: 14px; font-weight: 600; text-align: center; border: 1px solid rgba(46,213,83,0.2); margin-bottom: 15px; }
+.temp-box.temp-warn { color: #ffb703; border-color: rgba(255,183,3,0.35); }
+.temp-box.temp-fault { color: var(--accent-red); border-color: rgba(255,69,58,0.5); background: rgba(255,69,58,0.08); }
 .ms-badge { background: rgba(255,255,255,0.05); color: var(--accent-cyan); border: 1px solid rgba(0,242,254,0.2); padding: 2px 10px; border-radius: 8px; font-size: 13px; }
 hr { border: 0; border-top: 1px solid var(--border-light); margin: 20px 0; }
 .fw-ver { font-size: 11px; color: #52525b; text-align: center; margin-top: 18px; }
@@ -159,6 +161,7 @@ function triggerAction(action){
   }
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
+  x.onload = function(){ if(x.status !== 200) alert('Cannot start motor: ' + x.responseText); };
   x.send();
 }
 
@@ -167,7 +170,9 @@ if(!!window.EventSource){
   s.addEventListener('message', function(e){
     var o = JSON.parse(e.data);
     document.getElementById('t_disp').innerText = o.timer;
-    document.getElementById('temp_disp').innerText = o.temp;
+    var tempEl = document.getElementById('temp_disp');
+    tempEl.innerText = o.temp;
+    tempEl.className = 'temp-box' + (o.temp_level === 2 ? ' temp-fault' : o.temp_level === 1 ? ' temp-warn' : '');
     document.getElementById('ms_disp').innerText = "1 / " + o.microstep;
     
     var intpEl = document.getElementById('diag_intp');

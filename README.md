@@ -27,10 +27,14 @@
 | **GPIO 14** | STEP | 步進訊號脈衝 |
 | **GPIO 12** | DIR | 馬達轉向控制 |
 | **GPIO 13** | EN | 驅動器啟用腳位 |
-| **GPIO 16 (RX2)**| TX | UART 訊號輸入 (連至 TMC2209 TX) |
-| **GPIO 17 (TX2)**| RX | UART 訊號輸出 (需串聯 1kΩ 電阻至 UART 線) |
+| **GPIO 16 (RX2)**| PDN_UART | UART 訊號輸入 (直接連至 UART 線) |
+| **GPIO 17 (TX2)**| PDN_UART | UART 訊號輸出 (需串聯 1kΩ 電阻至 UART 線) |
 
 > ⚠️ **注意**：使用單線 UART 模式時，請確保 ESP32 TX2 (GPIO 17) 腳位上有串聯一顆 **1kΩ 電阻** 再連接至 TMC2209 的 UART 腳位。
+>
+> 📍 **UART 腳位位置**：FLY TMC2209 模組的 UART 是訊號排針**從 EN 端數起的第 4 腳**（EN、MS1、MS2、**UART**、PDN、CLK、STEP、DIR）。插到第 5 腳 (PDN) 時馬達仍會轉，但 UART 不通，所有參數設定都不會生效。
+>
+> 🔍 **診斷**：連上熱點後開啟 `http://192.168.4.1/diag`，看到 `version=0x21` 與 `<-- FOUND` 即代表 UART 正常。
 
 ---
 
