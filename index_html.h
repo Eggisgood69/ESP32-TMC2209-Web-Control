@@ -48,7 +48,7 @@ h2 {
 .label-text { font-size: 13px; color: #71717a; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; display: block;}
 
 .diag-grid {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px;
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 18px;
 }
 .diag-item {
   background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-light);
@@ -213,9 +213,6 @@ if(!!window.EventSource){
     intpEl.innerText = o.intpol ? "256 ON" : "OFF";
     intpEl.className = "diag-val " + (o.intpol ? "status-on" : "status-off");
 
-    var coolEl = document.getElementById('diag_cool');
-    coolEl.innerText = o.coolstep ? "ACTIVE" : "OFF";
-    coolEl.className = "diag-val " + (o.coolstep ? "status-on" : "status-off");
 
     var modeEl = document.getElementById('diag_mode');
     modeEl.innerText = o.mode;
@@ -235,10 +232,6 @@ if(!!window.EventSource){
     <div class='diag-item'>
       <div class='diag-title'>Interpolation</div>
       <div id='diag_intp' class='diag-val status-on'>256 ON</div>
-    </div>
-    <div class='diag-item'>
-      <div class='diag-title'>CoolStep</div>
-      <div id='diag_cool' class='diag-val status-on'>ACTIVE</div>
     </div>
     <div class='diag-item'>
       <div class='diag-title'>Drive Mode</div>

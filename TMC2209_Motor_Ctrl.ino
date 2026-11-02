@@ -7,7 +7,7 @@
 #include "secrets.h"     // Wi-Fi / OTA 密碼 (不進 Git，範本見 secrets.example.h)
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.3.4";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.3.5";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -203,7 +203,6 @@ void handleLiveStream() {
   }
 
   bool isIntpol = isInterpolationEnabled; 
-  bool isCoolStep = (driver.semin() > 0); 
   String modeStr = isStealthActive ? "StealthChop" : "SpreadCycle";
 
   client.print("retry: 1000\n");
@@ -214,7 +213,6 @@ void handleLiveStream() {
   client.print("\"running\":" + String(isRunning ? "true" : "false") + ",");
   client.print("\"microstep\":" + String(currentMicrostep) + ",");
   client.print("\"intpol\":" + String(isIntpol ? "true" : "false") + ",");
-  client.print("\"coolstep\":" + String(isCoolStep ? "true" : "false") + ",");
   client.print("\"mode\":\"" + modeStr + "\"");
   client.print("}\n\n");
   client.flush();
@@ -339,8 +337,8 @@ void setup() {
   driver.intpol(true); 
   isInterpolationEnabled = true;
 
-  driver.semin(4); 
-  driver.semax(2); 
+  // 不使用 CoolStep：明確關閉 (OTA 重開時驅動器不斷電，會保留上一版韌體寫入的設定)
+  driver.semin(0);
 
   driver.en_spreadCycle(false); 
   driver.TPWMTHRS(0);  // 關閉晶片依速度自動切換，模式改由 applyDriverMode() 在停止時切換
