@@ -142,6 +142,7 @@ document.addEventListener("DOMContentLoaded", function() {
     if (st[k] > 0) document.getElementById(k).value = st[k];
   });
   if (st.ma > 0) { document.getElementById('ma_input').value = st.ma; showStallHint(st.ma); }
+  if (st.ramp > 0) document.getElementById('ramp_input').value = st.ramp;
   if (Array.isArray(st.presets)) st.presets.forEach(function(v, i){ setPresetLabel(i, v); });
   // 用 ESP32 帶來的狀態先畫出按鈕，不必等第一次輪詢
   if (typeof st.run === 'boolean') { renderRunState(st.run); lastState = st.run; }
@@ -203,6 +204,23 @@ function handleCurrentInput(el) {
     errEl.innerText = (x.status === 200) ? '' : x.responseText;
     if (x.status === 200) showStallHint(v);
   };
+  x.send();
+}
+
+// 加減速時間 (秒)：運轉中也可修改，ESP32 會立即套用
+function handleRampInput(el) {
+  let errEl = document.getElementById('ramp_err');
+  let v = parseFloat(el.value);
+  if (isNaN(v) || v < 0.2 || v > 10) {
+    errEl.innerText = 'Enter a ramp time between 0.2 and 10 s';
+    return;
+  }
+  v = Math.round(v * 10) / 10;
+  el.value = v;
+  errEl.innerText = '';
+  var x = new XMLHttpRequest();
+  x.open('GET', '/api?ramp=' + v, true);
+  x.onload = function(){ errEl.innerText = (x.status === 200) ? '' : x.responseText; };
   x.send();
 }
 
@@ -456,6 +474,17 @@ function applyStatus(o) {
   <div id='ma_err' class='rpm-input-err'></div>
   <div class='fw-ver' style='margin-top: 0;'>About 0.7 &times; motor rated current. Change only while stopped.</div>
   <div id='ma_stall_hint' class='fw-ver' style='margin-top: 4px; color: #ffb703; display: none;'>Above 800 mA, stall detection may not trigger.</div>
+
+  <hr>
+
+  <span class='label-text'>Ramp Time</span>
+  <div class='rpm-input-row' style='margin: 0 0 4px 0;'>
+    <input type='number' id='ramp_input' min='0.2' max='10' step='0.1' value='5' inputmode='decimal'
+           onchange='handleRampInput(this)' onkeydown='if(event.key==="Enter") this.blur()'>
+    <span class='rpm-unit'>s (0 &harr; full speed)</span>
+  </div>
+  <div id='ramp_err' class='rpm-input-err'></div>
+  <div class='fw-ver' style='margin-top: 0;'>Time to speed up from stop and to slow down to stop. Too short may skip steps at high speed.</div>
 
   <div id='fw_ver' class='fw-ver'></div>
 </div>

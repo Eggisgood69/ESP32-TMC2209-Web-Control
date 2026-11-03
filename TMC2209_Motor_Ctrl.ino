@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.9.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.10.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -24,6 +24,11 @@ const uint16_t MAX_CURRENT_MA = 1200;    // 小型 TMC2209 模組散熱有限，
 const int MOTOR_STEPS_PER_REV = 200;     // 馬達每圈步數 (1.8度)
 const float MIN_ALLOWED_RPM = 0.1;       // 最低轉速 (與網頁拉桿下限一致)
 const float MAX_ALLOWED_RPM = 450.0;     // 最高安全轉速限制
+// 加減速時間：從靜止加速到目標轉速 (或從目標轉速減速到停止) 所需的秒數，可在網頁上修改並儲存。
+// 太短在高轉速時容易失步；太長時故障停機也要等這麼久才停下，所以上限設 10 秒
+const float DEFAULT_RAMP_SEC = 5.0;
+const float MIN_RAMP_SEC = 0.2;
+const float MAX_RAMP_SEC = 10.0;
 // 超過此轉速改用 1/16 微步 + SpreadCycle (在停止時切換)。
 // 刻意避開常用的 150 RPM：拉桿在 150 附近每格約差 0.6 RPM，界線設在 150 會讓「顯示 150」的轉速時常落到另一側
 const float SPREADCYCLE_RPM_THRESHOLD = 160.0;
@@ -80,6 +85,7 @@ unsigned long stallSettleAt = 0;
 
 Preferences prefs;
 uint16_t currentMA = DEFAULT_CURRENT_MA;
+float rampSec = DEFAULT_RAMP_SEC;
 const int PRESET_COUNT = 3;
 float presetRpm[PRESET_COUNT] = { 30.0, 60.0, 150.0 };  // 常用轉速快捷鍵 (網頁長按可改)
 bool isSettingsDirty = false;       // 設定有變更、尚未寫入 Flash
@@ -91,6 +97,7 @@ void loadSettings() {
   float rpm = prefs.getFloat("rpm", targetRPM);
   int dir = prefs.getInt("dir", targetDirection);
   uint16_t ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
+  float ramp = prefs.getFloat("ramp", DEFAULT_RAMP_SEC);
   for (int i = 0; i < PRESET_COUNT; i++) {
     float p = prefs.getFloat(("p" + String(i)).c_str(), presetRpm[i]);
     if (p > 0.0f) presetRpm[i] = constrain(p, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
@@ -100,7 +107,8 @@ void loadSettings() {
   if (rpm > 0.0f) targetRPM = constrain(rpm, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
   targetDirection = (dir == -1) ? -1 : 1;
   currentMA = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
-  Serial.printf("Settings loaded: %.1f RPM, dir %d, %u mA\n", targetRPM, targetDirection, currentMA);
+  if (ramp > 0.0f) rampSec = constrain(ramp, MIN_RAMP_SEC, MAX_RAMP_SEC);
+  Serial.printf("Settings loaded: %.1f RPM, dir %d, %u mA, ramp %.1f s\n", targetRPM, targetDirection, currentMA, rampSec);
 }
 
 void markSettingsDirty() {
@@ -117,6 +125,7 @@ void saveSettingsIfDue() {
   prefs.putFloat("rpm", targetRPM);
   prefs.putInt("dir", targetDirection);
   prefs.putUShort("ma", currentMA);
+  prefs.putFloat("ramp", rampSec);
   for (int i = 0; i < PRESET_COUNT; i++) prefs.putFloat(("p" + String(i)).c_str(), presetRpm[i]);
   prefs.end();
   isSettingsDirty = false;
@@ -315,8 +324,11 @@ void applySpeedAndRun() {
   uint32_t speedHz = (uint32_t)round(stepsPerSec);
   if (speedHz == 0 && targetRPM > 0.0f) speedHz = 1;
   
-  // 計算加速度，並確保加速度最低為 1
-  uint32_t accel = (uint32_t)round(stepsPerSec * 0.2);
+  // 依加減速時間計算加速度 (rampSec 秒內從 0 到目標轉速)，並確保加速度最低為 1。
+  // 取目前轉速與目標轉速的較大者：只用目標轉速算時，從高速調到極低轉速 (例如 45 → 0.1 RPM)
+  // 加速度會變得非常小，馬達要減速好幾十分鐘才到新轉速
+  float currentHz = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f;
+  uint32_t accel = (uint32_t)round(max(stepsPerSec, currentHz) / rampSec);
   if (accel == 0) accel = 1;
   
   stepper->setSpeedInHz(speedHz);
@@ -326,6 +338,16 @@ void applySpeedAndRun() {
     if (targetDirection == 1) stepper->runForward();
     else stepper->runBackward();
   }
+}
+
+// 依目前轉速重新計算減速度後停止，讓停止也花 rampSec 秒
+// (加速度可能是在更高轉速時算的，直接 stopMove() 會停得比設定快)
+void rampStop() {
+  if (!stepper) return;
+  float currentHz = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f;
+  uint32_t accel = (uint32_t)round(currentHz / rampSec);
+  if (accel > 0) stepper->setAcceleration(accel);
+  stepper->stopMove();
 }
 
 void updateMotorParameters() {
@@ -346,7 +368,7 @@ void updateMotorParameters() {
   if (optimalMicrostep != currentMicrostep || wantSpread != isSpreadCycle) {
     if (isRunning && stepper->isRunning()) {
       // 運轉中：先減速停止，由 loop() 在停止後套用新設定再重新啟動
-      stepper->stopMove();
+      rampStop();
       pendingMicrostep = optimalMicrostep;
       pendingSpread = wantSpread;
       isMicrostepChangePending = true;
@@ -377,10 +399,10 @@ void handleRoot() {
   page.replace("id='rpm_txt'>60", "id='rpm_txt'>" + rpmStr);
 
   // 把目前的轉向、計時器、電流與運轉狀態帶給網頁，開啟頁面時直接顯示正確狀態
-  char stateJson[192];
+  char stateJson[224];
   snprintf(stateJson, sizeof(stateJson),
-           "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d,\"ma\":%u,\"run\":%s,\"presets\":[%g,%g,%g]}",
-           targetDirection, tempHour, tempMin, tempSec, currentMA, isRunning ? "true" : "false",
+           "{\"dir\":%d,\"t_h\":%d,\"t_m\":%d,\"t_s\":%d,\"ma\":%u,\"ramp\":%.1f,\"run\":%s,\"presets\":[%g,%g,%g]}",
+           targetDirection, tempHour, tempMin, tempSec, currentMA, rampSec, isRunning ? "true" : "false",
            presetRpm[0], presetRpm[1], presetRpm[2]);
   page.replace("{/*SERVER_STATE*/}", stateJson);
   
@@ -505,6 +527,16 @@ void handleAPI() {
     driver.rms_current(currentMA);
     markSettingsDirty();
   }
+  // 加減速時間運轉中也可修改，下方 updateMotorParameters() 會立即套用
+  if (server.hasArg("ramp")) {
+    float r = server.arg("ramp").toFloat();
+    if (r < MIN_RAMP_SEC || r > MAX_RAMP_SEC) {
+      server.send(400, "text/plain", "Ramp time must be " + String(MIN_RAMP_SEC, 1) + "-" + String(MAX_RAMP_SEC, 0) + " s");
+      return;
+    }
+    rampSec = r;
+    markSettingsDirty();
+  }
   if (!parseRpmArg()) {
     server.send(400, "text/plain", "Invalid rpm");
     return;
@@ -549,7 +581,7 @@ void handleStop() {
   stallState = STALL_OFF;
   clearTimer();
 
-  if (stepper) stepper->stopMove();
+  rampStop();
   server.send(200, "text/plain", "OK");
 }
 
@@ -635,7 +667,7 @@ void loop() {
     if (isDriverFault && isRunning) {
       isRunning = false;
       isMicrostepChangePending = false;
-      if (stepper) stepper->stopMove();
+      rampStop();
       Serial.println("⛔ " + faultMessage + " -> motor stopped");
     }
   }
@@ -643,6 +675,6 @@ void loop() {
   if (isRunning && timerDuration > 0 && (millis() - timerStartHour >= timerDuration)) {
     isRunning = false;
     clearTimer();
-    if (stepper) stepper->stopMove();
+    rampStop();
   }
 }
