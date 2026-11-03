@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.10.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -30,8 +30,9 @@ const float DEFAULT_RAMP_SEC = 5.0;
 const float MIN_RAMP_SEC = 0.2;
 const float MAX_RAMP_SEC = 10.0;
 // 超過此轉速改用 1/16 微步 + SpreadCycle (在停止時切換)。
-// 刻意避開常用的 150 RPM：拉桿在 150 附近每格約差 0.6 RPM，界線設在 150 會讓「顯示 150」的轉速時常落到另一側
-const float SPREADCYCLE_RPM_THRESHOLD = 160.0;
+// 實測 (24V, 800~900 mA)：StealthChop 在約 150 RPM 以上會無負載自己失步並發出異音，
+// 調電流、加減速時間、PWM_REG 都只能減輕，所以界線設在 130，與失步區保留約 20 RPM 餘裕
+const float SPREADCYCLE_RPM_THRESHOLD = 130.0;
 // 卡住偵測 (StallGuard4)：只在 StealthChop 且轉速足夠時有效，低速時馬達反電動勢太小、讀值不可靠
 const float STALL_MIN_RPM = 30.0;
 const float STALL_RATIO = 0.35;          // 負載讀值掉到基準值的 35% 以下視為卡住 (數值越大越敏感)
@@ -39,6 +40,10 @@ const float STALL_RATIO = 0.35;          // 負載讀值掉到基準值的 35% �
 // 單次雜訊不會誤判；馬達被卡住跳步時讀值會高低交錯，「連續 3 次」可能永遠不成立，所以不用連續
 const uint8_t STALL_WINDOW = 6;
 const uint8_t STALL_CONFIRM_SAMPLES = 3;
+// StealthChop 電流調節速度 (PWM_REG, 1~15)，使用出廠值 1。
+// 曾試過 8 想改善 150 RPM 以上的失步，實測無效，所以改回出廠值。
+// 仍明確寫入：OTA 重開時驅動器不斷電，會保留上一版韌體寫入的值
+const uint8_t STEALTH_PWM_REG = 1;
 // =====================================================================
 
 WebServer server(80);
@@ -447,14 +452,17 @@ void handleDiag() {
   uint32_t drv = driver.DRV_STATUS();
   bool drvCrc = driver.CRCerror;
   uint32_t gconf = driver.GCONF();
+  uint32_t pwmconf = driver.PWMCONF();
   char buf[256];
   snprintf(buf, sizeof(buf),
     "IOIN=0x%08lX (version=0x%02lX, expect 0x21) crc_err=%d\n"
     "DRV_STATUS=0x%08lX crc_err=%d\n"
     "GCONF=0x%08lX\n"
+    "PWMCONF=0x%08lX (pwm_reg=%lu)\n"
     "uart_fail_count=%u\n",
     (unsigned long)ioin, (unsigned long)(ioin >> 24), ioinCrc,
-    (unsigned long)drv, drvCrc, (unsigned long)gconf, uartFailCount);
+    (unsigned long)drv, drvCrc, (unsigned long)gconf,
+    (unsigned long)pwmconf, (unsigned long)((pwmconf >> 24) & 0x0F), uartFailCount);
   String out = buf;
 
   // 掃描 UART 位址 0~3 (由 MS1/MS2 決定)，並測試 RX/TX 腳位對調
@@ -606,7 +614,8 @@ void setup() {
   // 不使用 CoolStep：明確關閉 (OTA 重開時驅動器不斷電，會保留上一版韌體寫入的設定)
   driver.semin(0);
 
-  driver.en_spreadCycle(false); 
+  driver.pwm_reg(STEALTH_PWM_REG);
+  driver.en_spreadCycle(false);
   driver.TPWMTHRS(0);  // 關閉晶片依速度自動切換，模式改由 applyDriverMode() 在停止時切換
 
   uint8_t result = driver.test_connection();

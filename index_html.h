@@ -74,7 +74,7 @@ button { width: 100%; padding: 16px; margin: 10px 0; font-size: 17px; font-weigh
 
 .toggle-group { display: flex; background: rgba(0, 0, 0, 0.4); padding: 4px; border-radius: 16px; border: 1px solid var(--border-light); margin-bottom: 18px; }
 .toggle-btn {
-  flex: 1; padding: 12px; font-size: 14px; font-weight: 600; color: #a1a1aa; border: none; background: transparent; border-radius: 12px; cursor: pointer; transition: 0.25s; text-align: center; margin: 0;
+  flex: 1; padding: 12px 6px; white-space: nowrap; font-size: 14px; font-weight: 600; color: #a1a1aa; border: none; background: transparent; border-radius: 12px; cursor: pointer; transition: 0.25s; text-align: center; margin: 0;
 }
 .toggle-btn.active { background: rgba(255, 255, 255, 0.1); color: #ffffff; border: 1px solid rgba(255,255,255,0.1); }
 
@@ -124,6 +124,41 @@ button { width: 100%; padding: 16px; margin: 10px 0; font-size: 17px; font-weigh
 .ms-badge { background: rgba(255,255,255,0.05); color: var(--accent-cyan); border: 1px solid rgba(0,242,254,0.2); padding: 2px 10px; border-radius: 8px; font-size: 13px; }
 hr { border: 0; border-top: 1px solid var(--border-light); margin: 20px 0; }
 .fw-ver { font-size: 11px; color: #52525b; text-align: center; margin-top: 18px; }
+
+/* 即時數值：手機上 2x2 排列，比一行一項短很多 */
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0 4px 0; }
+.stat { background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-light); padding: 8px 10px; border-radius: 12px; }
+.stat .live-val, .stat .ms-badge { display: inline-block; margin-top: 2px; }
+
+/* 版面 (RWD)：手機單欄、各區塊以分隔線隔開；平板兩欄；電腦三欄 */
+.layout { display: grid; grid-template-columns: 1fr; }
+.panel + .panel { border-top: 1px solid var(--border-light); margin-top: 20px; padding-top: 20px; }
+.settings > summary { cursor: pointer; list-style: none; margin-bottom: 0; }
+.settings > summary::-webkit-details-marker { display: none; }
+.settings > summary::after { content: ' \25B8'; }
+.settings[open] > summary { margin-bottom: 14px; }
+.settings[open] > summary::after { content: ' \25BE'; }
+.settings-grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
+
+@media (min-width: 720px) {
+  body { padding: 32px 24px; }
+  .card { max-width: 860px; padding: 28px; }
+  h2 { font-size: 24px; margin-bottom: 20px; }
+  .layout { grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+  .panel { background: rgba(0, 0, 0, 0.18); border: 1px solid var(--border-light); border-radius: 20px; padding: 20px; }
+  .panel + .panel { border-top: 1px solid var(--border-light); margin-top: 0; padding-top: 20px; }
+  .panel:last-child { grid-column: 1 / -1; }
+  .settings-grid { grid-template-columns: 1fr 1fr; gap: 24px; }
+  .settings > summary { pointer-events: none; }
+  .settings > summary::after, .settings[open] > summary::after { content: none; }
+}
+
+@media (min-width: 1100px) {
+  .card { max-width: 1180px; }
+  .layout { grid-template-columns: 1fr 1fr 0.8fr; }
+  .panel:last-child { grid-column: auto; }
+  .settings-grid { grid-template-columns: 1fr; }
+}
 </style>
 
 <script>
@@ -143,6 +178,11 @@ document.addEventListener("DOMContentLoaded", function() {
   });
   if (st.ma > 0) { document.getElementById('ma_input').value = st.ma; showStallHint(st.ma); }
   if (st.ramp > 0) document.getElementById('ramp_input').value = st.ramp;
+  // 平板/電腦畫面夠大，進階設定直接展開 (CSS 也會讓標題不能點，避免被收合)
+  var wide = window.matchMedia('(min-width: 720px)');
+  var openIfWide = function(){ if (wide.matches) document.getElementById('settings_box').open = true; };
+  openIfWide();
+  wide.addEventListener('change', openIfWide);
   if (Array.isArray(st.presets)) st.presets.forEach(function(v, i){ setPresetLabel(i, v); });
   // 用 ESP32 帶來的狀態先畫出按鈕，不必等第一次輪詢
   if (typeof st.run === 'boolean') { renderRunState(st.run); lastState = st.run; }
@@ -395,6 +435,9 @@ function applyStatus(o) {
 
 <div class='card'>
   <h2>TMC2209 Control</h2>
+  <div class='layout'>
+  <!-- 狀態面板：手機在最上方，平板/電腦在左欄 -->
+  <section class='panel'>
   <div id='temp_disp' class='temp-box'>🟢 Temp Normal (< 120&deg;C)</div>
 
   <div class='diag-grid'>
@@ -415,15 +458,18 @@ function applyStatus(o) {
   <div id='stall_alert' class='stall-alert'>&#9940; Motor stalled and was stopped. Clear the jam, then press START.</div>
   
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box'></span></div>
-  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Microstep Gear</span><span id='ms_disp' class='ms-badge'>1 / 16</span></div>
-  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Driver Current</span><span id='cur_disp' class='live-val'>&mdash;</span></div>
-  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Min Load Margin</span><span id='margin_disp' class='live-val'>&mdash;</span></div>
-  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Timer Remaining</span><span id='t_disp' style='color:#ffb703; font-weight:600;'>Continuous</span></div>
+  <div class='stat-grid'>
+    <div class='stat'><div class='diag-title'>Microstep</div><span id='ms_disp' class='ms-badge'>1 / 16</span></div>
+    <div class='stat'><div class='diag-title'>Driver Current</div><span id='cur_disp' class='live-val'>&mdash;</span></div>
+    <div class='stat'><div class='diag-title'>Min Load Margin</div><span id='margin_disp' class='live-val'>&mdash;</span></div>
+    <div class='stat'><div class='diag-title'>Timer Left</div><span id='t_disp' class='live-val' style='color:#ffb703;'>Continuous</span></div>
+  </div>
 
   <div id='action_btn_area'></div>
+  </section>
 
-  <hr>
-
+  <!-- 操作面板：轉速、轉向、計時器 -->
+  <section class='panel'>
   <span class='label-text'>Speed Control</span>
   <div class='rpm-display'><span id='rpm_txt'>60</span> <span class='rpm-unit'>RPM</span></div>
   
@@ -462,9 +508,14 @@ function applyStatus(o) {
     <input type='number' id='t_m' min='0' placeholder='Min' onchange='send("t_m",this.value)'>
     <input type='number' id='t_s' min='0' placeholder='Sec' onchange='send("t_s",this.value)'>
   </div>
+  </section>
 
-  <hr>
-
+  <!-- 進階設定：手機預設收合以縮短頁面，平板/電腦預設展開 -->
+  <section class='panel'>
+  <details id='settings_box' class='settings'>
+  <summary class='label-text'>Advanced Settings</summary>
+  <div class='settings-grid'>
+  <div>
   <span class='label-text'>Motor Current</span>
   <div class='rpm-input-row' style='margin: 0 0 4px 0;'>
     <input type='number' id='ma_input' min='200' max='1200' step='50' inputmode='numeric'
@@ -474,9 +525,9 @@ function applyStatus(o) {
   <div id='ma_err' class='rpm-input-err'></div>
   <div class='fw-ver' style='margin-top: 0;'>About 0.7 &times; motor rated current. Change only while stopped.</div>
   <div id='ma_stall_hint' class='fw-ver' style='margin-top: 4px; color: #ffb703; display: none;'>Above 800 mA, stall detection may not trigger.</div>
+  </div>
 
-  <hr>
-
+  <div>
   <span class='label-text'>Ramp Time</span>
   <div class='rpm-input-row' style='margin: 0 0 4px 0;'>
     <input type='number' id='ramp_input' min='0.2' max='10' step='0.1' value='5' inputmode='decimal'
@@ -485,6 +536,11 @@ function applyStatus(o) {
   </div>
   <div id='ramp_err' class='rpm-input-err'></div>
   <div class='fw-ver' style='margin-top: 0;'>Time to speed up from stop and to slow down to stop. Too short may skip steps at high speed.</div>
+  </div>
+  </div>
+  </details>
+  </section>
+  </div>
 
   <div id='fw_ver' class='fw-ver'></div>
 </div>
