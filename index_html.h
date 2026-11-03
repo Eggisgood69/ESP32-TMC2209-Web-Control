@@ -58,6 +58,7 @@ h2 {
 .diag-val { font-size: 11px; font-weight: 700; }
 .status-on { color: var(--accent-green); }
 .status-wait { color: #ffb703; }
+.live-val { font-size: 14px; font-weight: 600; color: #f4f4f5; }
 .status-alarm { color: var(--accent-red); }
 .wiring-alert { display: none; padding: 10px 12px; border-radius: 14px; font-size: 14px; font-weight: 600; text-align: center; margin-bottom: 12px; }
 .wiring-alert.warn { display: block; background: rgba(255,183,3,0.1); color: #ffb703; border: 1px solid rgba(255,183,3,0.45); }
@@ -140,7 +141,7 @@ document.addEventListener("DOMContentLoaded", function() {
   ['t_h', 't_m', 't_s'].forEach(function(k) {
     if (st[k] > 0) document.getElementById(k).value = st[k];
   });
-  if (st.ma > 0) document.getElementById('ma_input').value = st.ma;
+  if (st.ma > 0) { document.getElementById('ma_input').value = st.ma; showStallHint(st.ma); }
   if (Array.isArray(st.presets)) st.presets.forEach(function(v, i){ setPresetLabel(i, v); });
   // 用 ESP32 帶來的狀態先畫出按鈕，不必等第一次輪詢
   if (typeof st.run === 'boolean') { renderRunState(st.run); lastState = st.run; }
@@ -183,6 +184,11 @@ function presetUp(i) {
 
 function presetCancel() { clearTimeout(presetTimer); presetLongPressed = true; }
 
+// 實測：1000 mA 時馬達被卡住，負載讀值只降到約 40~57%，不會觸發卡住偵測；800 mA 時可在 1~2 秒內停機
+function showStallHint(ma) {
+  document.getElementById('ma_stall_hint').style.display = (ma > 800) ? 'block' : 'none';
+}
+
 function handleCurrentInput(el) {
   let errEl = document.getElementById('ma_err');
   let v = parseInt(el.value, 10);
@@ -193,7 +199,10 @@ function handleCurrentInput(el) {
   errEl.innerText = '';
   var x = new XMLHttpRequest();
   x.open('GET', '/api?ma=' + v, true);
-  x.onload = function(){ errEl.innerText = (x.status === 200) ? '' : x.responseText; };
+  x.onload = function(){
+    errEl.innerText = (x.status === 200) ? '' : x.responseText;
+    if (x.status === 200) showStallHint(v);
+  };
   x.send();
 }
 
@@ -339,6 +348,17 @@ function applyStatus(o) {
     }
     document.getElementById('stall_alert').style.display = (o.stall === 'stall') ? 'block' : 'none';
 
+    // 實際電流 (運轉中才有) 與本次運轉的最小負載餘裕：越接近 35% 代表越接近卡住門檻
+    document.getElementById('cur_disp').innerText = (o.running && o.cur_ma > 0) ? (o.cur_ma + ' mA') : '—';
+    var mEl = document.getElementById('margin_disp');
+    if (o.sg_min >= 0) {
+      mEl.innerText = o.sg_min + '%';
+      mEl.style.color = o.sg_min < 35 ? 'var(--accent-red)' : o.sg_min < 50 ? '#ffb703' : 'var(--accent-green)';
+    } else {
+      mEl.innerText = '—';
+      mEl.style.color = '';
+    }
+
     // 接線警告：1 = 疑似線圈開路 (黃)，2 = 短路 (紅，已停機)
     var wEl = document.getElementById('wiring_alert');
     wEl.innerText = o.wiring ? ((o.wiring_level === 2 ? '⛔ ' : '⚠️ ') + o.wiring) : '';
@@ -378,6 +398,8 @@ function applyStatus(o) {
   
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box'></span></div>
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Microstep Gear</span><span id='ms_disp' class='ms-badge'>1 / 16</span></div>
+  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Driver Current</span><span id='cur_disp' class='live-val'>&mdash;</span></div>
+  <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Min Load Margin</span><span id='margin_disp' class='live-val'>&mdash;</span></div>
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Timer Remaining</span><span id='t_disp' style='color:#ffb703; font-weight:600;'>Continuous</span></div>
 
   <div id='action_btn_area'></div>
@@ -433,6 +455,7 @@ function applyStatus(o) {
   </div>
   <div id='ma_err' class='rpm-input-err'></div>
   <div class='fw-ver' style='margin-top: 0;'>About 0.7 &times; motor rated current. Change only while stopped.</div>
+  <div id='ma_stall_hint' class='fw-ver' style='margin-top: 4px; color: #ffb703; display: none;'>Above 800 mA, stall detection may not trigger.</div>
 
   <div id='fw_ver' class='fw-ver'></div>
 </div>

@@ -5,10 +5,11 @@
 #include "index_html.h" // 引用獨立的網頁檔案
 #include <ArduinoOTA.h>
 #include "secrets.h"     // Wi-Fi / OTA 密碼 (不進 Git，範本見 secrets.example.h)
+#include <algorithm>
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.8.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.9.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -29,7 +30,10 @@ const float SPREADCYCLE_RPM_THRESHOLD = 160.0;
 // 卡住偵測 (StallGuard4)：只在 StealthChop 且轉速足夠時有效，低速時馬達反電動勢太小、讀值不可靠
 const float STALL_MIN_RPM = 30.0;
 const float STALL_RATIO = 0.35;          // 負載讀值掉到基準值的 35% 以下視為卡住 (數值越大越敏感)
-const uint8_t STALL_CONFIRM_SAMPLES = 3; // 連續 3 次 (約 150 ms) 才判定，避免單次雜訊
+// 最近 6 次取樣 (約 300 ms) 中有 3 次低於門檻才判定：
+// 單次雜訊不會誤判；馬達被卡住跳步時讀值會高低交錯，「連續 3 次」可能永遠不成立，所以不用連續
+const uint8_t STALL_WINDOW = 6;
+const uint8_t STALL_CONFIRM_SAMPLES = 3;
 // =====================================================================
 
 WebServer server(80);
@@ -49,6 +53,7 @@ bool isDriverFault = false;  // 故障時強制停止並禁止啟動，降溫或
 String faultMessage = "";    // 故障原因 (啟動被拒時回傳給網頁)
 String wiringAlert = "";     // 接線警告文字，空字串代表正常
 int wiringLevel = 0;         // 0 = 正常, 1 = 疑似開路 (只警告), 2 = 短路 (停機)
+uint16_t actualCurrentMA = 0; // 驅動器回報的實際電流 (運轉中才有值)
 uint8_t uartFailCount = 0;   // 連續 UART 失敗次數，避免單次雜訊誤判
 bool isStealthActive = true; // 驅動器實際模式 (DRV_STATUS bit30)，由溫度檢查一併更新
 
@@ -63,7 +68,14 @@ StallState stallState = STALL_OFF;
 uint16_t sgValue = 0;          // 最新的 SG_RESULT (越小代表負載越重)
 uint16_t sgBaseline = 0;       // 正常運轉時的平均值
 uint32_t sgSum = 0;
-uint8_t sgSamples = 0, sgLowCount = 0;
+uint8_t sgSamples = 0;
+int sgMinPct = -1;             // 本次運轉中負載讀值的最低百分比 (最小餘裕)，-1 = 尚未開始監測
+int sgRecentPct[STALL_WINDOW];  // 最近幾次取樣的百分比，用來排除單次突波
+uint8_t sgRecentCount = 0;
+// 除錯用：最近 40 次原始 SG_RESULT (約 2 秒)，由 /sg 提供，方便調整門檻
+const uint8_t SG_HIST_LEN = 40;
+uint16_t sgHist[SG_HIST_LEN];
+uint32_t sgSeq = 0;
 unsigned long stallSettleAt = 0;
 
 Preferences prefs;
@@ -155,6 +167,9 @@ void checkTMC2209Temperature() {
   bool t157 = s & (1UL << 11);
   isStealthActive = s & (1UL << 30);
 
+  // bit16..20 CS_ACTUAL：驅動器實際使用的電流級數 (0~31)，換算成 mA；停止時驅動器關閉，不顯示
+  actualCurrentMA = isRunning ? driver.cs2rms((s >> 16) & 0x1F) : 0;
+
   bool thermalFault = false;
   if (ot || t150) {
     plainTempStatus = t157 ? "🔴 Thermal Shutdown (> 157 deg C)" : "🔴 Thermal Shutdown (> 150 deg C)";
@@ -212,8 +227,9 @@ void resetStallMonitor() {
   sgBaseline = 0;
   sgSum = 0;
   sgSamples = 0;
-  sgLowCount = 0;
   stallSettleAt = 0;
+  sgRecentCount = 0;
+  if (stallState != STALL_TRIPPED) sgMinPct = -1;  // 卡住時保留最低值，方便查看
 }
 
 // 每 50 ms 讀一次 SG_RESULT：到達目標轉速並穩定 1 秒後，取 1 秒平均為基準，之後讀值過低就停機
@@ -240,6 +256,8 @@ void monitorStall() {
 
   sgValue = driver.SG_RESULT();
   if (driver.CRCerror) return;
+  sgHist[sgSeq % SG_HIST_LEN] = sgValue;
+  sgSeq++;
 
   if (stallState == STALL_WAIT) {
     sgSum += sgValue;
@@ -252,17 +270,38 @@ void monitorStall() {
   }
 
   // ARMED
-  if (sgValue < sgBaseline * STALL_RATIO) {
-    if (++sgLowCount >= STALL_CONFIRM_SAMPLES) {
-      stepper->forceStop();
-      isRunning = false;
-      clearTimer();
-      stallState = STALL_TRIPPED;
-      Serial.printf("⛔ Stall detected: SG %u (baseline %u) -> motor stopped\n", sgValue, sgBaseline);
-    }
-  } else {
-    sgLowCount = 0;
+  int pct = (int)((uint32_t)sgValue * 100 / sgBaseline);
+  sgRecentPct[sgRecentCount % STALL_WINDOW] = pct;
+  if (sgRecentCount < 255) sgRecentCount++;
+  if (sgRecentCount < STALL_WINDOW) return;
+
+  // 取視窗內第 STALL_CONFIRM_SAMPLES 小的值：它低於門檻，就代表至少有 3 次低於門檻。
+  // 最小餘裕也用同一個值，畫面上的數字可直接對照門檻
+  int sorted[STALL_WINDOW];
+  memcpy(sorted, sgRecentPct, sizeof(sorted));
+  std::sort(sorted, sorted + STALL_WINDOW);
+  int sustained = sorted[STALL_CONFIRM_SAMPLES - 1];
+  if (sgMinPct < 0 || sustained < sgMinPct) sgMinPct = sustained;
+
+  if (sustained < STALL_RATIO * 100) {
+    stepper->forceStop();
+    isRunning = false;
+    clearTimer();
+    stallState = STALL_TRIPPED;
+    Serial.printf("⛔ Stall detected: SG %u (baseline %u) -> motor stopped\n", sgValue, sgBaseline);
   }
+}
+
+void handleSgHistory() {
+  String json = "{\"seq\":" + String(sgSeq) + ",\"base\":" + String(sgBaseline) + ",\"v\":[";
+  uint8_t n = min<uint32_t>(sgSeq, SG_HIST_LEN);
+  for (uint8_t i = 0; i < n; i++) {
+    if (i) json += ",";
+    json += String(sgHist[(sgSeq - n + i) % SG_HIST_LEN]);
+  }
+  json += "]}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
 }
 
 void applySpeedAndRun() {
@@ -371,7 +410,9 @@ void handleStatus() {
   json += "\"sg\":" + String(sgValue) + ",";
   json += "\"sg_base\":" + String(sgBaseline) + ",";
   json += "\"wiring\":\"" + wiringAlert + "\",";
-  json += "\"wiring_level\":" + String(wiringLevel);
+  json += "\"wiring_level\":" + String(wiringLevel) + ",";
+  json += "\"cur_ma\":" + String(actualCurrentMA) + ",";
+  json += "\"sg_min\":" + String(sgMinPct);
   json += "}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", json);
@@ -557,6 +598,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/api", handleAPI); 
   server.on("/status", handleStatus);
+  server.on("/sg", handleSgHistory);
   server.on("/start", handleStart);
   server.on("/stop", handleStop);
   server.on("/diag", handleDiag);
