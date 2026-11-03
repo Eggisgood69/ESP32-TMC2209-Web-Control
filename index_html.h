@@ -138,14 +138,34 @@ hr { border: 0; border-top: 1px solid var(--border-light); margin: 20px 0; }
 .settings > summary::after { content: ' \25B8'; }
 .settings[open] > summary { margin-bottom: 14px; }
 .settings[open] > summary::after { content: ' \25BE'; }
-.settings-grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
+.settings-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
+
+/* 設定欄位：輸入框與單位放在同一個框內，說明文字靠左緊貼在下方 */
+.field .label-text { margin-bottom: 6px; }
+.field-input {
+  display: flex; align-items: center; gap: 8px; padding: 0 14px;
+  background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-light); border-radius: 12px; transition: 0.25s;
+}
+.field-input:focus-within { border-color: var(--accent-cyan); background: rgba(0, 0, 0, 0.5); }
+.field-input input {
+  flex: 1; min-width: 0; padding: 11px 0; font-size: 16px; font-weight: 600;
+  background: transparent; color: #ffffff; border: none; outline: none;
+}
+.field-input input:disabled { color: #71717a; }
+.field-unit { font-size: 13px; color: #71717a; font-weight: 600; }
+.field-hint { font-size: 12px; color: #71717a; line-height: 1.45; margin-top: 6px; }
+.field-warn { color: #ffb703; }
+.field-err { font-size: 12px; color: var(--accent-red); margin-top: 6px; }
+.field-err:empty { display: none; }
 
 @media (min-width: 720px) {
   body { padding: 32px 24px; }
   .card { max-width: 860px; padding: 28px; }
   h2 { font-size: 24px; margin-bottom: 20px; }
-  .layout { grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
-  .panel { background: rgba(0, 0, 0, 0.18); border: 1px solid var(--border-light); border-radius: 20px; padding: 20px; }
+  /* 同一列的面板等高，START/STOP 按鈕固定在狀態面板底部 */
+  .layout { grid-template-columns: 1fr 1fr; gap: 20px; align-items: stretch; }
+  .panel { background: rgba(0, 0, 0, 0.18); border: 1px solid var(--border-light); border-radius: 20px; padding: 20px; display: flex; flex-direction: column; }
+  #action_btn_area { margin-top: auto; }
   .panel + .panel { border-top: 1px solid var(--border-light); margin-top: 0; padding-top: 20px; }
   .panel:last-child { grid-column: 1 / -1; }
   .settings-grid { grid-template-columns: 1fr 1fr; gap: 24px; }
@@ -515,27 +535,27 @@ function applyStatus(o) {
   <details id='settings_box' class='settings'>
   <summary class='label-text'>Advanced Settings</summary>
   <div class='settings-grid'>
-  <div>
-  <span class='label-text'>Motor Current</span>
-  <div class='rpm-input-row' style='margin: 0 0 4px 0;'>
+  <div class='field'>
+  <label class='label-text' for='ma_input'>Motor Current</label>
+  <div class='field-input'>
     <input type='number' id='ma_input' min='200' max='1200' step='50' inputmode='numeric'
            onchange='handleCurrentInput(this)' onkeydown='if(event.key==="Enter") this.blur()'>
-    <span class='rpm-unit'>mA (RMS)</span>
+    <span class='field-unit'>mA RMS</span>
   </div>
-  <div id='ma_err' class='rpm-input-err'></div>
-  <div class='fw-ver' style='margin-top: 0;'>About 0.7 &times; motor rated current. Change only while stopped.</div>
-  <div id='ma_stall_hint' class='fw-ver' style='margin-top: 4px; color: #ffb703; display: none;'>Above 800 mA, stall detection may not trigger.</div>
+  <div id='ma_err' class='field-err'></div>
+  <div class='field-hint'>About 0.7 &times; motor rated current. Change only while stopped.</div>
+  <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Above 800 mA, stall detection may not trigger.</div>
   </div>
 
-  <div>
-  <span class='label-text'>Ramp Time</span>
-  <div class='rpm-input-row' style='margin: 0 0 4px 0;'>
+  <div class='field'>
+  <label class='label-text' for='ramp_input'>Ramp Time</label>
+  <div class='field-input'>
     <input type='number' id='ramp_input' min='0.2' max='10' step='0.1' value='5' inputmode='decimal'
            onchange='handleRampInput(this)' onkeydown='if(event.key==="Enter") this.blur()'>
-    <span class='rpm-unit'>s (0 &harr; full speed)</span>
+    <span class='field-unit'>sec</span>
   </div>
-  <div id='ramp_err' class='rpm-input-err'></div>
-  <div class='fw-ver' style='margin-top: 0;'>Time to speed up from stop and to slow down to stop. Too short may skip steps at high speed.</div>
+  <div id='ramp_err' class='field-err'></div>
+  <div class='field-hint'>Time to reach full speed from stop, and to stop. Too short may skip steps at high speed.</div>
   </div>
   </div>
   </details>
