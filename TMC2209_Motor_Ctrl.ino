@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.7";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.8";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -492,6 +492,8 @@ void handleStatus() {
   json += "\"temp\":\"" + plainTempStatus + "\",";
   json += "\"temp_level\":" + String(tempLevel) + ",";
   json += "\"running\":" + String(isRunning ? "true" : "false") + ",";
+  json += "\"rpm\":" + String(targetRPM, 1) + ",";      // 讓所有分頁同步顯示目前轉速與轉向
+  json += "\"dir\":" + String(targetDirection) + ",";
   json += "\"moving\":" + String((stepper && stepper->isRunning()) ? "true" : "false") + ",";  // 含按 STOP 後的減速
   json += "\"microstep\":" + String(currentMicrostep) + ",";
   json += "\"intpol\":" + String(isInterpolationEnabled ? "true" : "false") + ",";
@@ -633,12 +635,9 @@ void handleStart() {
     server.send(503, "text/plain", isDriverConfigured ? faultMessage : String(DRIVER_NOT_CONFIGURED_MSG));
     return;
   }
-  if (!parseRpmArg()) {
-    server.send(400, "text/plain", "Invalid rpm");
-    return;
-  }
-  if (server.hasArg("rpm")) markSettingsDirty();
-
+  // START 一律使用裝置目前的目標轉速，不接受網頁帶來的 rpm：
+  // 很久沒重新整理的舊分頁 (或其他手機) 會帶著舊轉速，把別處剛調低的轉速改回高速。
+  // 網頁調整轉速時已即時送出 /api?rpm=，所以這裡不需要
   stallState = STALL_OFF;  // 清除上次的卡住狀態
   isRunning = true;
   if (stepper) stepper->setCurrentPosition(0);

@@ -312,7 +312,12 @@ function handleRpmInput(el) {
   setRpm(v, true);
 }
 
-function send(p, v){ var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + v, true); x.send(); } 
+// 剛在本頁調整轉速/轉向後短時間內，不讓 /status 的同步蓋掉 (送出前讀到的舊值會讓畫面跳回去)
+var rpmEditUntil = 0, dirEditUntil = 0;
+function send(p, v){
+  if (p === 'rpm') rpmEditUntil = Date.now() + 2000;
+  if (p === 'dir') dirEditUntil = Date.now() + 2000;
+  var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + v, true); x.send(); } 
 
 function showDirection(dir) {
   document.getElementById('btn_cw').classList.toggle('active', dir === 1);
@@ -327,6 +332,7 @@ function setDirection(dir) {
 function handleSlider(sliderVal, isChange) {
   let x = parseFloat(sliderVal) / 100.0;
   currentRpmVal = normalizeRpm(0.1 + 449.9 * Math.pow(x, 3));
+  rpmEditUntil = Date.now() + 2000;  // 拖曳中 (尚未放開) 也不要被同步蓋掉
   updateRpmUI(currentRpmVal);
   document.getElementById('rpm_input').value = currentRpmVal;
   if (isChange) {
@@ -344,10 +350,8 @@ function updateRpmUI(rpm) {
 }
 
 function triggerAction(action){
+  // START 不帶轉速：裝置使用自己目前的目標轉速 (轉速調整時已即時送出)
   var url = '/' + action;
-  if(action === 'start'){
-    url += '?rpm=' + currentRpmVal;
-  }
   // 先停用按鈕避免連點，收到回應後立即更新狀態 (不重新整理頁面)
   var btn = document.querySelector('#action_btn_area button');
   if (btn) btn.disabled = true;
@@ -397,6 +401,16 @@ document.addEventListener("DOMContentLoaded", function() {
 });
 
 function applyStatus(o) {
+    // 同步裝置目前的轉速與轉向 (其他分頁或手機改過時，本頁也跟著更新)；
+    // 正在輸入轉速或剛調整過時不同步，避免打斷操作
+    var now = Date.now();
+    if (typeof o.rpm === 'number' && now > rpmEditUntil &&
+        document.activeElement !== document.getElementById('rpm_input') &&
+        Math.abs(o.rpm - currentRpmVal) >= 0.05) {
+      setRpm(o.rpm, false);
+    }
+    if ((o.dir === 1 || o.dir === -1) && now > dirEditUntil) showDirection(o.dir);
+
     document.getElementById('t_disp').innerText = o.timer;
     var tempEl = document.getElementById('temp_disp');
     tempEl.innerText = o.temp;
