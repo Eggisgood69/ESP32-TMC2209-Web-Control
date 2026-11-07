@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.1";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.2";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -81,7 +81,8 @@ uint32_t sgSum = 0;
 uint8_t sgSamples = 0;
 int sgMinPct = -1;             // 本次運轉中負載讀值的最低百分比 (最小餘裕)，-1 = 尚未開始監測
 int sgRecentPct[STALL_WINDOW];  // 最近幾次取樣的百分比，用來排除單次突波
-uint8_t sgRecentCount = 0;
+uint8_t sgRecentCount = 0;      // 視窗內已有幾筆 (最多 STALL_WINDOW)
+uint8_t sgRecentIdx = 0;        // 下一筆要寫入的位置 (環狀，0 ~ STALL_WINDOW-1)
 // 除錯用：最近 40 次原始 SG_RESULT (約 2 秒)，由 /sg 提供，方便調整門檻
 const uint8_t SG_HIST_LEN = 40;
 uint16_t sgHist[SG_HIST_LEN];
@@ -243,6 +244,7 @@ void resetStallMonitor() {
   sgSamples = 0;
   stallSettleAt = 0;
   sgRecentCount = 0;
+  sgRecentIdx = 0;
   if (stallState != STALL_TRIPPED) sgMinPct = -1;  // 卡住時保留最低值，方便查看
 }
 
@@ -285,8 +287,11 @@ void monitorStall() {
 
   // ARMED
   int pct = (int)((uint32_t)sgValue * 100 / sgBaseline);
-  sgRecentPct[sgRecentCount % STALL_WINDOW] = pct;
-  if (sgRecentCount < 255) sgRecentCount++;
+  // 環狀寫入：索引獨立循環。不可用「計數 % 視窗」，計數停在上限後會一直寫同一格，
+  // 其他格停在舊的正常值，長時間運轉後就永遠湊不到 3 次低值 (v1.12.1 以前的錯誤)
+  sgRecentPct[sgRecentIdx] = pct;
+  sgRecentIdx = (sgRecentIdx + 1) % STALL_WINDOW;
+  if (sgRecentCount < STALL_WINDOW) sgRecentCount++;
   if (sgRecentCount < STALL_WINDOW) return;
 
   // 取視窗內第 STALL_CONFIRM_SAMPLES 小的值：它低於門檻，就代表至少有 3 次低於門檻。
