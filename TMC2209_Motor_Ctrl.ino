@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.9";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -101,6 +101,16 @@ const int PRESET_COUNT = 3;
 float presetRpm[PRESET_COUNT] = { 30.0, 60.0, 150.0 };  // 常用轉速快捷鍵 (網頁長按可改)
 bool isSettingsDirty = false;       // 設定有變更、尚未寫入 Flash
 unsigned long settingsChangedAt = 0;
+
+// 安全監控 (卡住偵測、故障檢查、計時停機) 跑在獨立的任務裡，不受網頁連線影響：
+// WebServer 讀取請求時會等待資料，慢速或斷斷續續的連線可能讓 loop() 卡住好幾秒，
+// 這段時間如果放在 loop() 裡，卡住偵測與故障停機都會延誤。
+// 兩邊會共用 UART 與馬達狀態，所以用互斥鎖確保同一時間只有一方在操作
+SemaphoreHandle_t ctrlMutex = NULL;
+struct CtrlLock {
+  CtrlLock()  { xSemaphoreTakeRecursive(ctrlMutex, portMAX_DELAY); }
+  ~CtrlLock() { xSemaphoreGiveRecursive(ctrlMutex); }
+};
 
 // 開機時讀回上次儲存的設定；讀到異常值時改用預設值
 void loadSettings() {
@@ -653,6 +663,7 @@ void handleStop() {
 }
 
 void setup() {
+  ctrlMutex = xSemaphoreCreateRecursiveMutex();
   Serial.begin(115200);
   Serial.printf("TMC2209 Motor Ctrl %s (build %s)\n", FW_VERSION, FW_BUILD);
   pinMode(enPin, OUTPUT); digitalWrite(enPin, HIGH); 
@@ -691,20 +702,27 @@ void setup() {
   isDriverConfigured = configureDriver();
   Serial.println(isDriverConfigured ? "✅ TMC2209 設定完成" : "⚠️ TMC2209 設定未確認 (VM 未通電或 UART 接線問題)，稍後自動重試");
 
+  // 優先權 2 高於 loop() (1)，loop() 忙碌時也能準時執行
+  xTaskCreatePinnedToCore(safetyTask, "safety", 6144, NULL, 2, NULL, 1);
+
   WiFi.softAP(ap_ssid, ap_password);
   server.on("/", handleRoot);
-  server.on("/api", handleAPI); 
-  server.on("/status", handleStatus);
-  server.on("/sg", handleSgHistory);
-  server.on("/start", handleStart);
-  server.on("/stop", handleStop);
-  server.on("/diag", handleDiag);
+  // 除了主頁 (只讀取數值、資料量大) 以外都在互斥鎖內處理；回應都很短，不會長時間佔住鎖
+  server.on("/api",    [] { CtrlLock l; handleAPI(); });
+  server.on("/status", [] { CtrlLock l; handleStatus(); });
+  server.on("/sg",     [] { CtrlLock l; handleSgHistory(); });
+  server.on("/start",  [] { CtrlLock l; handleStart(); });
+  server.on("/stop",   [] { CtrlLock l; handleStop(); });
+  server.on("/diag",   [] { CtrlLock l; handleDiag(); });
   server.begin();
 
   ArduinoOTA.setHostname("ESP32-TMC2209-Control"); 
   ArduinoOTA.setPassword(SECRET_OTA_PASSWORD);              
 
   ArduinoOTA.onStart([]() {
+    CtrlLock l;
+    isRunning = false;                 // 避免安全監控任務在更新期間又重新啟動馬達
+    isMicrostepChangePending = false;
     if (stepper) stepper->stopMove();
     Serial.println("Start updating firmware...");
   });
@@ -712,12 +730,10 @@ void setup() {
   ArduinoOTA.begin(); 
 }
 
-void loop() {
-  ArduinoOTA.handle();
-  server.handleClient();
-  saveSettingsIfDue();
+// 安全監控任務：每 10 ms 執行一次
+void safetyTick() {
   monitorStall();
-  
+
   if (isMicrostepChangePending && stepper != NULL && !stepper->isRunning()) {
     applyDriverMode(pendingMicrostep, pendingSpread);
     isMicrostepChangePending = false;
@@ -742,4 +758,21 @@ void loop() {
     clearTimer();
     rampStop();
   }
+}
+
+void safetyTask(void *) {
+  for (;;) {
+    {
+      CtrlLock lock;
+      safetyTick();
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+void loop() {
+  ArduinoOTA.handle();
+  server.handleClient();  // 可能因慢速連線卡住，所以安全監控不放在這裡
+  CtrlLock lock;
+  saveSettingsIfDue();
 }
