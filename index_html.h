@@ -354,7 +354,10 @@ function triggerAction(action){
   var x = new XMLHttpRequest();
   x.open('GET', url, true);
   x.onload = function(){
-    if(x.status !== 200) alert('Cannot start motor: ' + x.responseText);
+    if(x.status !== 200) alert('Cannot ' + action + ' motor: ' + x.responseText);
+    // 收到回應就恢復按鈕：運轉狀態改變時 refreshStatus() 會換成新按鈕；
+    // 被拒絕 (例如故障中) 時狀態沒變、按鈕不會重畫，不恢復就會一直停用，故障解除後也無法重試
+    if (btn) btn.disabled = false;
     refreshStatus();
   };
   x.onerror = function(){ if (btn) btn.disabled = false; };
