@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.5";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.6";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -65,6 +65,11 @@ String wiringAlert = "";     // 接線警告文字，空字串代表正常
 int wiringLevel = 0;         // 0 = 正常, 1 = 疑似開路 (只警告), 2 = 短路 (停機)
 uint16_t actualCurrentMA = 0; // 驅動器回報的實際電流 (運轉中才有值)
 uint8_t uartFailCount = 0;   // 連續 UART 失敗次數，避免單次雜訊誤判
+// 驅動器設定 (微步、模式、電流等) 已寫入並讀回確認。驅動器的 VM (12~24V) 比 ESP32 晚通電、
+// 或中途斷電再恢復時，TMC2209 會回到出廠設定 (1/8 微步、Vref 電流)，實際轉速會和畫面不符，
+// 所以確認前禁止啟動
+bool isDriverConfigured = false;
+const char* DRIVER_NOT_CONFIGURED_MSG = "Driver settings not confirmed (driver power lost or UART error). Retrying...";
 bool isStealthActive = true; // 驅動器實際模式 (DRV_STATUS bit30)，由溫度檢查一併更新
 
 bool isMicrostepChangePending = false;
@@ -154,6 +159,32 @@ void applyDriverMode(int microstep, bool spread) {
   driver.microsteps(microstep);
   driver.en_spreadCycle(spread);
   delay(10);
+  // 讀回確認；失敗時禁止啟動，由 loop() 每秒的檢查重新寫入
+  if (isDriverConfigured) isDriverConfigured = configureDriver();
+  if (!isDriverConfigured) isRunning = false;  // 設定沒寫進驅動器，不啟動
+}
+
+// 依程式保存的副本重寫驅動器全部設定，並讀回 GCONF / CHOPCONF 確認。
+// TMCStepper 每次寫入都是修改程式內的副本再整筆送出，副本一直是正確設定，
+// 所以驅動器重新上電後用 push() 就能完整還原
+bool configureDriver() {
+  driver.push();
+  driver.GSTAT(0b111);  // 清除 reset 旗標：之後再看到它，就代表驅動器又重新上電過
+  uint32_t g = driver.GCONF();
+  bool gOk = !driver.CRCerror;
+  uint32_t c = driver.CHOPCONF();
+  bool cOk = !driver.CRCerror;
+  if (!gOk || !cOk) return false;
+
+  uint8_t expMres = 0;  // MRES：0 = 1/256 ... 8 = 全步
+  for (int m = 256; m > currentMicrostep && expMres < 8; m >>= 1) expMres++;
+  bool ok = ((c >> 24) & 0x0F) == expMres     // 微步
+         && (c & 0x0F) != 0                     // toff (0 = 輸出關閉)
+         && ((g >> 2) & 1) == isSpreadCycle     // 驅動模式
+         && ((g >> 6) & 1) && ((g >> 7) & 1);   // pdn_disable、mstep_reg_select (微步由 UART 決定)
+  Serial.printf("Driver config %s (GCONF=0x%08lX CHOPCONF=0x%08lX)\n", ok ? "verified" : "MISMATCH",
+                (unsigned long)g, (unsigned long)c);
+  return ok;
 }
 
 void checkTMC2209Temperature() {
@@ -174,7 +205,23 @@ void checkTMC2209Temperature() {
     }
     return;
   }
+  bool uartRecovered = uartFailCount >= 3;  // 剛從 UART 斷線恢復 (例如 VM 斷電後恢復)
   uartFailCount = 0;
+
+  // GSTAT bit0 reset：驅動器重新上電過，所有設定已回到出廠值
+  uint8_t gstat = driver.GSTAT();
+  bool driverWasReset = !driver.CRCerror && (gstat & 0x01);
+  if (driverWasReset || uartRecovered || !isDriverConfigured) {
+    if (isDriverConfigured) Serial.println("⚠️ Driver power was lost -> re-applying settings");
+    if (isRunning) {
+      // 設定已遺失 (微步不對，實際轉速會錯)，先停止，等重新設定後由使用者再啟動
+      isRunning = false;
+      isMicrostepChangePending = false;
+      clearTimer();
+      rampStop();
+    }
+    isDriverConfigured = configureDriver();
+  }
 
   // TMC2209 DRV_STATUS: bit0 otpw, bit1 ot, bit8 t120, bit9 t143, bit10 t150, bit11 t157
   bool otpw = s & (1UL << 0);
@@ -235,8 +282,8 @@ void checkTMC2209Temperature() {
     wiringLevel = 0;
   }
 
-  isDriverFault = thermalFault || wiringLevel == 2;
-  faultMessage = thermalFault ? plainTempStatus : wiringAlert;
+  isDriverFault = thermalFault || wiringLevel == 2 || !isDriverConfigured;
+  faultMessage = thermalFault ? plainTempStatus : (wiringLevel == 2) ? wiringAlert : DRIVER_NOT_CONFIGURED_MSG;
 }
 
 // 轉速或運轉狀態改變時重新取基準 (卡住後保留 STALL 狀態，直到下次按 START)
@@ -453,8 +500,10 @@ void handleStatus() {
   json += "\"stall\":\"" + String(stallNames[stallState]) + "\",";
   json += "\"sg\":" + String(sgValue) + ",";
   json += "\"sg_base\":" + String(sgBaseline) + ",";
-  json += "\"wiring\":\"" + wiringAlert + "\",";
-  json += "\"wiring_level\":" + String(wiringLevel) + ",";
+  // 接線警告欄也用來顯示「驅動器設定未確認」(短路警告優先)
+  bool showCfg = !isDriverConfigured && wiringLevel != 2;
+  json += "\"wiring\":\"" + (showCfg ? String(DRIVER_NOT_CONFIGURED_MSG) : wiringAlert) + "\",";
+  json += "\"wiring_level\":" + String(showCfg ? 2 : wiringLevel) + ",";
   json += "\"cur_ma\":" + String(actualCurrentMA) + ",";
   json += "\"sg_min\":" + String(sgMinPct);
   json += "}";
@@ -580,8 +629,8 @@ void handleAPI() {
 }
 
 void handleStart() {
-  if (isDriverFault) {
-    server.send(503, "text/plain", faultMessage);
+  if (isDriverFault || !isDriverConfigured) {
+    server.send(503, "text/plain", isDriverConfigured ? faultMessage : String(DRIVER_NOT_CONFIGURED_MSG));
     return;
   }
   if (!parseRpmArg()) {
@@ -635,13 +684,6 @@ void setup() {
   driver.en_spreadCycle(false);
   driver.TPWMTHRS(0);  // 關閉晶片依速度自動切換，模式改由 applyDriverMode() 在停止時切換
 
-  uint8_t result = driver.test_connection();
-  if (result == 0) {
-    Serial.println("✅ TMC2209 UART 通訊成功！");
-  } else {
-    Serial.printf("⚠️ TMC2209 UART 回應異常 (代碼: %d)，請檢查接線與 1K 電阻。\n", result);
-  }
-
   engine.init();
   stepper = engine.stepperConnectToPin(stepPin);
   if (stepper != NULL) {
@@ -651,6 +693,10 @@ void setup() {
     Serial.println("✅ HardDrive engine initialized!");
     updateMotorParameters();  // 依讀回的轉速先設好微步與模式 (停止狀態，不會啟動)
   }
+
+  // 寫入並讀回確認全部設定。失敗 (例如 VM 尚未通電) 時，loop() 每秒的檢查會自動重試
+  isDriverConfigured = configureDriver();
+  Serial.println(isDriverConfigured ? "✅ TMC2209 設定完成" : "⚠️ TMC2209 設定未確認 (VM 未通電或 UART 接線問題)，稍後自動重試");
 
   WiFi.softAP(ap_ssid, ap_password);
   server.on("/", handleRoot);
@@ -682,7 +728,7 @@ void loop() {
   if (isMicrostepChangePending && stepper != NULL && !stepper->isRunning()) {
     applyDriverMode(pendingMicrostep, pendingSpread);
     isMicrostepChangePending = false;
-    
+
     if (isRunning) applySpeedAndRun(); 
   }
 
