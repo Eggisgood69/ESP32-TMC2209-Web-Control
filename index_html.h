@@ -450,6 +450,8 @@ function applyStatus(o) {
       }
     }
     lastState = o.running;
+    // 按 STOP 後馬達還在減速時也不能改電流 (ESP32 會拒絕)
+    document.getElementById('ma_input').disabled = o.running || o.moving === true;
 }
 </script></head><body>
 

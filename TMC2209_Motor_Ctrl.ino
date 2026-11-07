@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.3";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.4";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -381,9 +381,12 @@ void updateMotorParameters() {
   bool wantSpread = targetRPM > SPREADCYCLE_RPM_THRESHOLD;
 
   if (optimalMicrostep != currentMicrostep || wantSpread != isSpreadCycle) {
-    if (isRunning && stepper->isRunning()) {
-      // 運轉中：先減速停止，由 loop() 在停止後套用新設定再重新啟動
-      rampStop();
+    // 以「步進脈衝是否還在送」判斷，而不是 isRunning：按 STOP 後 isRunning 立刻變 false，
+    // 但馬達還在減速，這時切換微步或由 SpreadCycle 切回 StealthChop 會讓馬達卡住、異音
+    if (stepper->isRunning()) {
+      // 運轉中先減速停止 (按 STOP 後的減速中則已在停止，不必再下令)，
+      // 由 loop() 在完全停止後套用新設定，若仍需運轉再重新啟動
+      if (isRunning) rampStop();
       pendingMicrostep = optimalMicrostep;
       pendingSpread = wantSpread;
       isMicrostepChangePending = true;
@@ -439,6 +442,7 @@ void handleStatus() {
   json += "\"temp\":\"" + plainTempStatus + "\",";
   json += "\"temp_level\":" + String(tempLevel) + ",";
   json += "\"running\":" + String(isRunning ? "true" : "false") + ",";
+  json += "\"moving\":" + String((stepper && stepper->isRunning()) ? "true" : "false") + ",";  // 含按 STOP 後的減速
   json += "\"microstep\":" + String(currentMicrostep) + ",";
   json += "\"intpol\":" + String(isInterpolationEnabled ? "true" : "false") + ",";
   json += "\"mode\":\"" + String(isStealthActive ? "StealthChop" : "SpreadCycle") + "\",";
@@ -536,9 +540,9 @@ void handleAPI() {
       server.send(400, "text/plain", "Current must be " + String(MIN_CURRENT_MA) + "-" + String(MAX_CURRENT_MA) + " mA");
       return;
     }
-    // 運轉中突然改變電流可能失步，只允許停止時修改
-    if (isRunning) {
-      server.send(409, "text/plain", "Stop the motor before changing current");
+    // 運轉中突然改變電流可能失步，只允許完全停止時修改 (按 STOP 後的減速期間也不行)
+    if (isRunning || (stepper && stepper->isRunning())) {
+      server.send(409, "text/plain", "Wait until the motor has fully stopped before changing current");
       return;
     }
     currentMA = ma;
