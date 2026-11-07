@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.8";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.9";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -533,23 +533,17 @@ void handleDiag() {
     (unsigned long)pwmconf, (unsigned long)((pwmconf >> 24) & 0x0F), uartFailCount);
   String out = buf;
 
-  // 掃描 UART 位址 0~3 (由 MS1/MS2 決定)，並測試 RX/TX 腳位對調
-  const int pinSets[2][2] = { {16, 17}, {17, 16} };
-  for (int p = 0; p < 2; p++) {
-    Serial2.end();
-    Serial2.begin(115200, SERIAL_8N1, pinSets[p][0], pinSets[p][1]);
-    delay(20);
-    for (uint8_t a = 0; a < 4; a++) {
-      TMC2209Stepper probe(&Serial2, RSENSE_VALUE, a);
-      uint32_t v = probe.IOIN();
-      snprintf(buf, sizeof(buf), "scan rx=%d tx=%d addr=%u: IOIN=0x%08lX crc_err=%d%s\n",
-        pinSets[p][0], pinSets[p][1], a, (unsigned long)v, probe.CRCerror,
-        (!probe.CRCerror && (v >> 24) == 0x21) ? "  <-- FOUND" : "");
-      out += buf;
-    }
+  // 掃描 UART 位址 0~3 (由 MS1/MS2 決定)，只用文件指定的接線 (RX=16, TX=17)。
+  // 不再測試 RX/TX 對調：對調時 GPIO16 會變成輸出，且沒有經過 1k 電阻直接接在 UART 線上，
+  // 可能和驅動器的輸出互相衝突
+  for (uint8_t a = 0; a < 4; a++) {
+    TMC2209Stepper probe(&Serial2, RSENSE_VALUE, a);
+    uint32_t v = probe.IOIN();
+    snprintf(buf, sizeof(buf), "scan rx=16 tx=17 addr=%u: IOIN=0x%08lX crc_err=%d%s\n",
+      a, (unsigned long)v, probe.CRCerror,
+      (!probe.CRCerror && (v >> 24) == 0x21) ? "  <-- FOUND" : "");
+    out += buf;
   }
-  Serial2.end();
-  Serial2.begin(115200, SERIAL_8N1, 16, 17);
 
   // 回音測試：單線 UART 時，TX 送出的位元組會經 1k 電阻回到 RX
   while (Serial2.available()) Serial2.read();
