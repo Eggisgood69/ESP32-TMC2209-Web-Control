@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.2";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.3";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -356,7 +356,12 @@ void rampStop() {
   if (!stepper) return;
   float currentHz = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f;
   uint32_t accel = (uint32_t)round(currentHz / rampSec);
-  if (accel > 0) stepper->setAcceleration(accel);
+  if (accel > 0) {
+    stepper->setAcceleration(accel);
+    // setAcceleration() 只是記下新值，要 applySpeedAcceleration() 才會生效；
+    // 少了這行，stopMove() 會沿用舊的減速度 (v1.12.2 以前的錯誤)
+    stepper->applySpeedAcceleration();
+  }
   stepper->stopMove();
 }
 
