@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.12.4";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.12.5";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -159,8 +159,12 @@ void applyDriverMode(int microstep, bool spread) {
 void checkTMC2209Temperature() {
   // UART 讀不到時 DRV_STATUS 會回傳 0 (看起來像「正常」)，所以先確認通訊：
   // IOIN 的版本欄位 (bit 31..24) 在 TMC2209 固定為 0x21
+  // DRV_STATUS 也要讀成功才採用：讀失敗時可能回傳 0，看起來像「溫度正常、接線正常」，
+  // 會把過熱或短路故障誤解除。任一個讀失敗就保留上一次的狀態，連續失敗才判定 UART 故障
   uint32_t ioin = driver.IOIN();
-  if (driver.CRCerror || (ioin >> 24) != 0x21) {
+  bool ioinOk = !driver.CRCerror && (ioin >> 24) == 0x21;
+  uint32_t s = ioinOk ? driver.DRV_STATUS() : 0;
+  if (!ioinOk || driver.CRCerror) {
     if (uartFailCount < 255) uartFailCount++;
     if (uartFailCount >= 3) {
       plainTempStatus = "⚪ Driver UART Error (temp unknown)";
@@ -173,7 +177,6 @@ void checkTMC2209Temperature() {
   uartFailCount = 0;
 
   // TMC2209 DRV_STATUS: bit0 otpw, bit1 ot, bit8 t120, bit9 t143, bit10 t150, bit11 t157
-  uint32_t s = driver.DRV_STATUS();
   bool otpw = s & (1UL << 0);
   bool ot   = s & (1UL << 1);
   bool t120 = s & (1UL << 8);
