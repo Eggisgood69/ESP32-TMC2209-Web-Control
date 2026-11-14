@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.1";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -69,6 +69,8 @@ uint8_t uartFailCount = 0;   // 連續 UART 失敗次數，避免單次雜訊誤
 // 或中途斷電再恢復時，TMC2209 會回到出廠設定 (1/8 微步、Vref 電流)，實際轉速會和畫面不符，
 // 所以確認前禁止啟動
 bool isDriverConfigured = false;
+bool isSafetyTaskRunning = false;   // 安全監控任務建立成功；失敗時禁止啟動 (沒有卡住偵測與故障停機)
+const char* SAFETY_TASK_FAILED_MSG = "Safety monitor failed to start. Restart the device.";
 const char* DRIVER_NOT_CONFIGURED_MSG = "Driver settings not confirmed (driver power lost or UART error). Retrying...";
 bool isStealthActive = true; // 驅動器實際模式 (DRV_STATUS bit30)，由溫度檢查一併更新
 
@@ -223,6 +225,7 @@ void checkTMC2209Temperature() {
   bool driverWasReset = !driver.CRCerror && (gstat & 0x01);
   if (driverWasReset || uartRecovered || !isDriverConfigured) {
     if (isDriverConfigured) Serial.println("⚠️ Driver power was lost -> re-applying settings");
+    isDriverConfigured = false;  // 重新寫入並確認前禁止啟動
     if (isRunning) {
       // 設定已遺失 (微步不對，實際轉速會錯)，先停止，等重新設定後由使用者再啟動
       isRunning = false;
@@ -230,7 +233,9 @@ void checkTMC2209Temperature() {
       clearTimer();
       rampStop();
     }
-    isDriverConfigured = configureDriver();
+    // 等步進脈衝完全停止才重寫：減速途中改微步，轉速會突然跳動。
+    // 還在減速時先跳過，下一秒的檢查會再試 (isDriverConfigured 仍為 false)
+    if (!stepper || !stepper->isRunning()) isDriverConfigured = configureDriver();
   }
 
   // TMC2209 DRV_STATUS: bit0 otpw, bit1 ot, bit8 t120, bit9 t143, bit10 t150, bit11 t157
@@ -513,9 +518,13 @@ void handleStatus() {
   json += "\"sg\":" + String(sgValue) + ",";
   json += "\"sg_base\":" + String(sgBaseline) + ",";
   // 接線警告欄也用來顯示「驅動器設定未確認」(短路警告優先)
-  bool showCfg = !isDriverConfigured && wiringLevel != 2;
-  json += "\"wiring\":\"" + (showCfg ? String(DRIVER_NOT_CONFIGURED_MSG) : wiringAlert) + "\",";
-  json += "\"wiring_level\":" + String(showCfg ? 2 : wiringLevel) + ",";
+  // 優先順序：安全監控未啟動 > 短路 > 設定未確認
+  String alert = wiringAlert;
+  int alertLevel = wiringLevel;
+  if (!isSafetyTaskRunning) { alert = SAFETY_TASK_FAILED_MSG; alertLevel = 2; }
+  else if (!isDriverConfigured && wiringLevel != 2) { alert = DRIVER_NOT_CONFIGURED_MSG; alertLevel = 2; }
+  json += "\"wiring\":\"" + alert + "\",";
+  json += "\"wiring_level\":" + String(alertLevel) + ",";
   json += "\"cur_ma\":" + String(actualCurrentMA) + ",";
   json += "\"sg_min\":" + String(sgMinPct);
   json += "}";
@@ -524,7 +533,8 @@ void handleStatus() {
 }
 
 // 診斷頁：顯示 TMC2209 原始暫存器值，用來確認 UART 接線
-void handleDiag() {
+// 讀取診斷資料 (需在互斥鎖內呼叫：會使用 UART)
+String collectDiag() {
   uint32_t ioin = driver.IOIN();
   bool ioinCrc = driver.CRCerror;
   uint32_t drv = driver.DRV_STATUS();
@@ -565,7 +575,16 @@ void handleDiag() {
   while (Serial2.available()) { Serial2.read(); echoCount++; }
   snprintf(buf, sizeof(buf), "echo test: sent 4 bytes, received %d\n", echoCount);
   out += buf;
+  return out;
+}
 
+// 只在讀 UART 時持有鎖；送出網頁 (可能因連線慢而等待) 時已解鎖，不影響安全監控
+void handleDiag() {
+  String out;
+  {
+    CtrlLock lock;
+    out = collectDiag();
+  }
   server.send(200, "text/plain", out);
 }
 
@@ -635,6 +654,10 @@ void handleAPI() {
 }
 
 void handleStart() {
+  if (!isSafetyTaskRunning) {
+    server.send(503, "text/plain", SAFETY_TASK_FAILED_MSG);
+    return;
+  }
   if (isDriverFault || !isDriverConfigured) {
     server.send(503, "text/plain", isDriverConfigured ? faultMessage : String(DRIVER_NOT_CONFIGURED_MSG));
     return;
@@ -703,7 +726,8 @@ void setup() {
   Serial.println(isDriverConfigured ? "✅ TMC2209 設定完成" : "⚠️ TMC2209 設定未確認 (VM 未通電或 UART 接線問題)，稍後自動重試");
 
   // 優先權 2 高於 loop() (1)，loop() 忙碌時也能準時執行
-  xTaskCreatePinnedToCore(safetyTask, "safety", 6144, NULL, 2, NULL, 1);
+  isSafetyTaskRunning = xTaskCreatePinnedToCore(safetyTask, "safety", 6144, NULL, 2, NULL, 1) == pdPASS;
+  if (!isSafetyTaskRunning) Serial.println("⛔ Safety task could not be created -> START disabled");
 
   WiFi.softAP(ap_ssid, ap_password);
   server.on("/", handleRoot);
@@ -713,7 +737,7 @@ void setup() {
   server.on("/sg",     [] { CtrlLock l; handleSgHistory(); });
   server.on("/start",  [] { CtrlLock l; handleStart(); });
   server.on("/stop",   [] { CtrlLock l; handleStop(); });
-  server.on("/diag",   [] { CtrlLock l; handleDiag(); });
+  server.on("/diag",   handleDiag);  // 自行在讀 UART 時上鎖
   server.begin();
 
   ArduinoOTA.setHostname("ESP32-TMC2209-Control"); 
