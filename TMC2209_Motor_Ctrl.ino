@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.1";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.2";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -376,6 +376,37 @@ void monitorStall() {
   }
 }
 
+// 網頁回應先存起來，解鎖後才送出：網路慢時 server.send() 可能要等，
+// 若在互斥鎖內送出，安全監控任務 (卡住偵測、故障、計時) 也得跟著等
+struct Reply {
+  int code = 0;
+  const char* type = "text/plain";
+  String body;
+  bool noStore = false;
+};
+Reply pendingReply;
+
+void reply(int code, const char* type, const String& body) {
+  pendingReply.code = code;
+  pendingReply.type = type;
+  pendingReply.body = body;
+}
+
+// 在鎖內執行處理函式 (只操作狀態、準備回應)，解鎖後再送出
+void handleLocked(void (*fn)()) {
+  Reply r;
+  {
+    CtrlLock lock;
+    pendingReply = Reply();
+    fn();
+    r = pendingReply;
+    pendingReply = Reply();
+  }
+  if (r.noStore) server.sendHeader("Cache-Control", "no-store");
+  if (r.code == 0) { r.code = 500; r.body = "No response"; }
+  server.send(r.code, r.type, r.body);
+}
+
 void handleSgHistory() {
   String json = "{\"seq\":" + String(sgSeq) + ",\"base\":" + String(sgBaseline) + ",\"v\":[";
   uint8_t n = min<uint32_t>(sgSeq, SG_HIST_LEN);
@@ -384,8 +415,8 @@ void handleSgHistory() {
     json += String(sgHist[(sgSeq - n + i) % SG_HIST_LEN]);
   }
   json += "]}";
-  server.sendHeader("Cache-Control", "no-store");
-  server.send(200, "application/json", json);
+  pendingReply.noStore = true;
+  reply(200, "application/json", json);
 }
 
 void applySpeedAndRun() {
@@ -528,13 +559,13 @@ void handleStatus() {
   json += "\"cur_ma\":" + String(actualCurrentMA) + ",";
   json += "\"sg_min\":" + String(sgMinPct);
   json += "}";
-  server.sendHeader("Cache-Control", "no-store");
-  server.send(200, "application/json", json);
+  pendingReply.noStore = true;
+  reply(200, "application/json", json);
 }
 
 // 診斷頁：顯示 TMC2209 原始暫存器值，用來確認 UART 接線
 // 讀取診斷資料 (需在互斥鎖內呼叫：會使用 UART)
-String collectDiag() {
+String collectDiag(bool fullScan) {
   uint32_t ioin = driver.IOIN();
   bool ioinCrc = driver.CRCerror;
   uint32_t drv = driver.DRV_STATUS();
@@ -552,6 +583,14 @@ String collectDiag() {
     (unsigned long)drv, drvCrc, (unsigned long)gconf,
     (unsigned long)pwmconf, (unsigned long)((pwmconf >> 24) & 0x0F), uartFailCount);
   String out = buf;
+
+  // 運轉中或按 STOP 後仍在減速時，不做位址掃描與回音測試：
+  // 沒回應的位址要等逾時，期間會佔住互斥鎖，延誤安全監控
+  if (!fullScan) {
+    out += "Motor is running or decelerating: address scan and echo test skipped.\n"
+           "Open /diag again after the motor has fully stopped for the full diagnostics.\n";
+    return out;
+  }
 
   // 掃描 UART 位址 0~3 (由 MS1/MS2 決定)，只用文件指定的接線 (RX=16, TX=17)。
   // 不再測試 RX/TX 對調：對調時 GPIO16 會變成輸出，且沒有經過 1k 電阻直接接在 UART 線上，
@@ -583,7 +622,8 @@ void handleDiag() {
   String out;
   {
     CtrlLock lock;
-    out = collectDiag();
+    bool moving = isRunning || (stepper && stepper->isRunning());  // 含按 STOP 後的減速
+    out = collectDiag(!moving);
   }
   server.send(200, "text/plain", out);
 }
@@ -603,23 +643,23 @@ void handleAPI() {
     int i = server.arg("preset").toInt();
     float v = server.arg("set").toFloat();
     if (i < 0 || i >= PRESET_COUNT || !(v > 0.0f)) {
-      server.send(400, "text/plain", "Invalid preset");
+      reply(400, "text/plain", "Invalid preset");
       return;
     }
     presetRpm[i] = constrain(v, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
     markSettingsDirty();
-    server.send(200, "text/plain", String(presetRpm[i], 1));
+    reply(200, "text/plain", String(presetRpm[i], 1));
     return;
   }
   if (server.hasArg("ma")) {
     long ma = server.arg("ma").toInt();
     if (ma < MIN_CURRENT_MA || ma > MAX_CURRENT_MA) {
-      server.send(400, "text/plain", "Current must be " + String(MIN_CURRENT_MA) + "-" + String(MAX_CURRENT_MA) + " mA");
+      reply(400, "text/plain", "Current must be " + String(MIN_CURRENT_MA) + "-" + String(MAX_CURRENT_MA) + " mA");
       return;
     }
     // 運轉中突然改變電流可能失步，只允許完全停止時修改 (按 STOP 後的減速期間也不行)
     if (isRunning || (stepper && stepper->isRunning())) {
-      server.send(409, "text/plain", "Wait until the motor has fully stopped before changing current");
+      reply(409, "text/plain", "Wait until the motor has fully stopped before changing current");
       return;
     }
     currentMA = ma;
@@ -630,14 +670,14 @@ void handleAPI() {
   if (server.hasArg("ramp")) {
     float r = server.arg("ramp").toFloat();
     if (r < MIN_RAMP_SEC || r > MAX_RAMP_SEC) {
-      server.send(400, "text/plain", "Ramp time must be " + String(MIN_RAMP_SEC, 1) + "-" + String(MAX_RAMP_SEC, 0) + " s");
+      reply(400, "text/plain", "Ramp time must be " + String(MIN_RAMP_SEC, 1) + "-" + String(MAX_RAMP_SEC, 0) + " s");
       return;
     }
     rampSec = r;
     markSettingsDirty();
   }
   if (!parseRpmArg()) {
-    server.send(400, "text/plain", "Invalid rpm");
+    reply(400, "text/plain", "Invalid rpm");
     return;
   }
   if (server.hasArg("rpm") || server.hasArg("dir")) markSettingsDirty();
@@ -650,16 +690,16 @@ void handleAPI() {
     if (isRunning && timerDuration > 0) timerStartHour = millis();
   }
   updateMotorParameters();
-  server.send(200, "text/plain", "OK");
+  reply(200, "text/plain", "OK");
 }
 
 void handleStart() {
   if (!isSafetyTaskRunning) {
-    server.send(503, "text/plain", SAFETY_TASK_FAILED_MSG);
+    reply(503, "text/plain", SAFETY_TASK_FAILED_MSG);
     return;
   }
   if (isDriverFault || !isDriverConfigured) {
-    server.send(503, "text/plain", isDriverConfigured ? faultMessage : String(DRIVER_NOT_CONFIGURED_MSG));
+    reply(503, "text/plain", isDriverConfigured ? faultMessage : String(DRIVER_NOT_CONFIGURED_MSG));
     return;
   }
   // START 一律使用裝置目前的目標轉速，不接受網頁帶來的 rpm：
@@ -672,7 +712,7 @@ void handleStart() {
   updateMotorParameters();
   
   if (timerDuration > 0) timerStartHour = millis();
-  server.send(200, "text/plain", "OK");
+  reply(200, "text/plain", "OK");
 }
 
 void handleStop() {
@@ -682,7 +722,7 @@ void handleStop() {
   clearTimer();
 
   rampStop();
-  server.send(200, "text/plain", "OK");
+  reply(200, "text/plain", "OK");
 }
 
 void setup() {
@@ -731,12 +771,12 @@ void setup() {
 
   WiFi.softAP(ap_ssid, ap_password);
   server.on("/", handleRoot);
-  // 除了主頁 (只讀取數值、資料量大) 以外都在互斥鎖內處理；回應都很短，不會長時間佔住鎖
-  server.on("/api",    [] { CtrlLock l; handleAPI(); });
-  server.on("/status", [] { CtrlLock l; handleStatus(); });
-  server.on("/sg",     [] { CtrlLock l; handleSgHistory(); });
-  server.on("/start",  [] { CtrlLock l; handleStart(); });
-  server.on("/stop",   [] { CtrlLock l; handleStop(); });
+  // 除了主頁 (只讀取數值) 與 /diag (自行上鎖) 以外，都在鎖內處理、解鎖後才送出回應
+  server.on("/api",    [] { handleLocked(handleAPI); });
+  server.on("/status", [] { handleLocked(handleStatus); });
+  server.on("/sg",     [] { handleLocked(handleSgHistory); });
+  server.on("/start",  [] { handleLocked(handleStart); });
+  server.on("/stop",   [] { handleLocked(handleStop); });
   server.on("/diag",   handleDiag);  // 自行在讀 UART 時上鎖
   server.begin();
 
