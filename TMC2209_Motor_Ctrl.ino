@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.2";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.3";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -173,7 +173,7 @@ void applyDriverMode(int microstep, bool spread) {
   delay(10);
   // 讀回確認；失敗時禁止啟動，由 loop() 每秒的檢查重新寫入
   if (isDriverConfigured) isDriverConfigured = configureDriver();
-  if (!isDriverConfigured) isRunning = false;  // 設定沒寫進驅動器，不啟動
+  if (!isDriverConfigured && isRunning) stopMotor();  // 設定沒寫進驅動器，不啟動
 }
 
 // 依程式保存的副本重寫驅動器全部設定，並讀回 GCONF / CHOPCONF 確認。
@@ -228,10 +228,7 @@ void checkTMC2209Temperature() {
     isDriverConfigured = false;  // 重新寫入並確認前禁止啟動
     if (isRunning) {
       // 設定已遺失 (微步不對，實際轉速會錯)，先停止，等重新設定後由使用者再啟動
-      isRunning = false;
-      isMicrostepChangePending = false;
-      clearTimer();
-      rampStop();
+      stopMotor();
     }
     // 等步進脈衝完全停止才重寫：減速途中改微步，轉速會突然跳動。
     // 還在減速時先跳過，下一秒的檢查會再試 (isDriverConfigured 仍為 false)
@@ -247,7 +244,9 @@ void checkTMC2209Temperature() {
   bool t157 = s & (1UL << 11);
   isStealthActive = s & (1UL << 30);
 
-  // bit16..20 CS_ACTUAL：驅動器實際使用的電流級數 (0~31)，換算成 mA；停止時驅動器關閉，不顯示
+  // bit16..20 CS_ACTUAL：驅動器實際使用的電流級數 (0~31)，換算成 mA；停止時驅動器關閉，不顯示。
+  // 這是估算值：換算假設 VREF ≥ 2.5V。GCONF.I_scale_analog = 1 時，實際電流還會乘上
+  // (模組 VREF 旋鈕電壓 ÷ 2.5V)，韌體讀不到 VREF，所以旋鈕調低時實際電流會比顯示的小
   actualCurrentMA = isRunning ? driver.cs2rms((s >> 16) & 0x1F) : 0;
 
   bool thermalFault = false;
@@ -503,6 +502,16 @@ void clearTimer() {
   tempHour = tempMin = tempSec = 0;
 }
 
+// 所有停機路徑共用 (STOP、計時結束、故障、驅動器重置、設定失敗)：
+// 一律取消待切換的模式並清除計時器，和網頁停止時清空時/分/秒的行為一致，
+// 避免故障解除後再按 START 時，舊的倒數又重新開始
+void stopMotor() {
+  isRunning = false;
+  isMicrostepChangePending = false;
+  clearTimer();
+  rampStop();
+}
+
 void handleRoot() {
   String page = String(INDEX_HTML);
   
@@ -710,18 +719,18 @@ void handleStart() {
   if (stepper) stepper->setCurrentPosition(0);
   
   updateMotorParameters();
+  if (!isRunning) {  // 切換微步/模式時設定沒寫進驅動器
+    reply(503, "text/plain", DRIVER_NOT_CONFIGURED_MSG);
+    return;
+  }
   
   if (timerDuration > 0) timerStartHour = millis();
   reply(200, "text/plain", "OK");
 }
 
 void handleStop() {
-  isRunning = false;
-  isMicrostepChangePending = false;
   stallState = STALL_OFF;
-  clearTimer();
-
-  rampStop();
+  stopMotor();
   reply(200, "text/plain", "OK");
 }
 
@@ -787,6 +796,7 @@ void setup() {
     CtrlLock l;
     isRunning = false;                 // 避免安全監控任務在更新期間又重新啟動馬達
     isMicrostepChangePending = false;
+    clearTimer();
     if (stepper) stepper->stopMove();
     Serial.println("Start updating firmware...");
   });
@@ -810,17 +820,13 @@ void safetyTick() {
     lastCheck = millis();
     checkTMC2209Temperature();
     if (isDriverFault && isRunning) {
-      isRunning = false;
-      isMicrostepChangePending = false;
-      rampStop();
+      stopMotor();
       Serial.println("⛔ " + faultMessage + " -> motor stopped");
     }
   }
 
   if (isRunning && timerDuration > 0 && (millis() - timerStartHour >= timerDuration)) {
-    isRunning = false;
-    clearTimer();
-    rampStop();
+    stopMotor();
   }
 }
 

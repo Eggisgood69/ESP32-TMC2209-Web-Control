@@ -499,7 +499,7 @@ function applyStatus(o) {
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box'></span></div>
   <div class='stat-grid'>
     <div class='stat'><div class='diag-title'>Microstep</div><span id='ms_disp' class='ms-badge'>1 / 16</span></div>
-    <div class='stat'><div class='diag-title'>Driver Current</div><span id='cur_disp' class='live-val'>&mdash;</span></div>
+    <div class='stat'><div class='diag-title' title='Estimated from the driver current scale, assuming VREF &ge; 2.5 V. If the VREF pot on the module is set lower, the real current is lower.'>Driver Current (est.)</div><span id='cur_disp' class='live-val'>&mdash;</span></div>
     <div class='stat'><div class='diag-title'>Min Load Margin</div><span id='margin_disp' class='live-val'>&mdash;</span></div>
     <div class='stat'><div class='diag-title'>Timer Left</div><span id='t_disp' class='live-val' style='color:#ffb703;'>Continuous</span></div>
   </div>
@@ -562,7 +562,7 @@ function applyStatus(o) {
     <span class='field-unit'>mA RMS</span>
   </div>
   <div id='ma_err' class='field-err'></div>
-  <div class='field-hint'>About 0.7 &times; motor rated current. Change only while stopped.</div>
+  <div class='field-hint'>About 0.7 &times; motor rated current. Change only while stopped. Actual current is lower if the module's VREF pot is below 2.5 V.</div>
   <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Above 800 mA, stall detection may not trigger.</div>
   </div>
 
