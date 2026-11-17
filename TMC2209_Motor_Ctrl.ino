@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.3";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.4";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -199,6 +199,15 @@ bool configureDriver() {
   return ok;
 }
 
+// 實際速度是否在目標速度的 ±tolerance 之內 (雙向)。
+// 只看「≥ 95%」不夠：降速時一開始速度就高於目標，會被當成已到速
+bool isAtTargetSpeed(float tolerance) {
+  if (!stepper) return false;
+  float targetHz = (targetRPM / 60.0f) * MOTOR_STEPS_PER_REV * currentMicrostep;
+  float actualHz = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f;
+  return fabsf(actualHz - targetHz) <= targetHz * tolerance;
+}
+
 void checkTMC2209Temperature() {
   // UART 讀不到時 DRV_STATUS 會回傳 0 (看起來像「正常」)，所以先確認通訊：
   // IOIN 的版本欄位 (bit 31..24) 在 TMC2209 固定為 0x21
@@ -274,8 +283,7 @@ void checkTMC2209Temperature() {
   static uint8_t openCount = 0;
   bool atSpeed = false;
   if (stepper && isRunning && !isMicrostepChangePending && !isSpreadCycle) {
-    float targetHz = (targetRPM / 60.0f) * MOTOR_STEPS_PER_REV * currentMicrostep;
-    atSpeed = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f >= targetHz * 0.95f;
+    atSpeed = isAtTargetSpeed(0.05f);
   }
   if (atSpeed && (openA || openB)) {
     if (openCount < 255) openCount++;
@@ -324,12 +332,11 @@ void monitorStall() {
     return;
   }
 
-  // 等加速完成：實際速度達到目標的 95%
-  float targetHz = (targetRPM / 60.0f) * MOTOR_STEPS_PER_REV * currentMicrostep;
-  float actualHz = abs(stepper->getCurrentSpeedInMilliHz()) / 1000.0f;
+  // 等速度穩定在目標的 ±5% 內 1 秒後才取基準 (加速、降速都適用)。
+  // 取樣途中速度離開範圍，就丟掉已取的樣本重新等待，避免基準混到加減速中的讀值
   if (stallState == STALL_OFF) stallState = STALL_WAIT;
   if (stallState == STALL_WAIT && sgBaseline == 0) {
-    if (actualHz < targetHz * 0.95f) { stallSettleAt = 0; return; }
+    if (!isAtTargetSpeed(0.05f)) { stallSettleAt = 0; sgSum = 0; sgSamples = 0; return; }
     if (stallSettleAt == 0) { stallSettleAt = millis() + 1000; return; }
     if (millis() < stallSettleAt) return;
   }
