@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.6";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.7";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -186,14 +186,28 @@ void applyDriverMode(int microstep, bool spread) {
 const uint8_t CONFIG_WRITE_COUNT = 12;  // push() 寫 11 個暫存器 + 清除 GSTAT 1 筆
 uint8_t lastConfigWrites = 0;           // 最近一次設定時晶片收到的筆數 (顯示在 /diag)
 
+// 讀 IFCNT。TMCStepper 會把 CRC 剛好為 0 的回覆當成錯誤，而 IFCNT 的 256 個值中
+// 有一個的 CRC 是 0，停在那個值時永遠讀不到。所以讀失敗時送一筆無害的寫入
+// (TPWMTHRS = 0，和現行設定相同) 讓計數器前進後再讀一次；bumps 回報多寫了幾筆
+bool readIfcnt(uint8_t &value, uint8_t &bumps) {
+  for (uint8_t i = 0; i < 2; i++) {
+    value = driver.IFCNT();
+    if (!driver.CRCerror) return true;
+    driver.TPWMTHRS(0);
+    bumps++;
+  }
+  return false;
+}
+
 bool configureDriver() {
-  uint8_t before = driver.IFCNT();
-  if (driver.CRCerror) return false;
+  uint8_t before, after, bumps = 0;
+  if (!readIfcnt(before, bumps)) return false;
+  bumps = 0;  // 讀 before 之前多寫的筆數不影響增量
   driver.push();
   driver.GSTAT(0b111);  // 清除 reset 旗標：之後再看到它，就代表驅動器又重新上電過
-  uint8_t after = driver.IFCNT();
-  if (driver.CRCerror) return false;
-  lastConfigWrites = (uint8_t)(after - before);  // uint8_t 相減，自動處理 255 → 0 的回繞
+  if (!readIfcnt(after, bumps)) return false;
+  // uint8_t 相減自動處理 255 → 0 的回繞；扣掉讀 after 時為了避開 CRC=0 多寫的筆數
+  lastConfigWrites = (uint8_t)(after - before - bumps);
   if (lastConfigWrites != CONFIG_WRITE_COUNT) {
     Serial.printf("Driver config: only %u of %u writes received\n", lastConfigWrites, CONFIG_WRITE_COUNT);
     return false;
