@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.9";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.14.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -227,7 +227,8 @@ bool configureDriver() {
   bool ok = ((c >> 24) & 0x0F) == expMres     // 微步
          && (c & 0x0F) != 0                     // toff (0 = 輸出關閉)
          && ((g >> 2) & 1) == isSpreadCycle     // 驅動模式
-         && ((g >> 6) & 1) && ((g >> 7) & 1);   // pdn_disable、mstep_reg_select (微步由 UART 決定)
+         && ((g >> 6) & 1) && ((g >> 7) & 1)    // pdn_disable、mstep_reg_select (微步由 UART 決定)
+         && !(g & 1);                           // I_scale_analog = 0：電流用內部參考，不受 VREF 旋鈕影響
   Serial.printf("Driver config %s (GCONF=0x%08lX CHOPCONF=0x%08lX)\n", ok ? "verified" : "MISMATCH",
                 (unsigned long)g, (unsigned long)c);
   return ok;
@@ -293,8 +294,7 @@ void checkTMC2209Temperature() {
   isStealthActive = s & (1UL << 30);
 
   // bit16..20 CS_ACTUAL：驅動器實際使用的電流級數 (0~31)，換算成 mA；停止時驅動器關閉，不顯示。
-  // 這是估算值：換算假設 VREF ≥ 2.5V。GCONF.I_scale_analog = 1 時，實際電流還會乘上
-  // (模組 VREF 旋鈕電壓 ÷ 2.5V)，韌體讀不到 VREF，所以旋鈕調低時實際電流會比顯示的小
+  // 已改用內部參考電壓 (I_scale_analog = 0)，換算結果就是實際電流 (誤差主要來自感測電阻)
   actualCurrentMA = isRunning ? driver.cs2rms((s >> 16) & 0x1F) : 0;
 
   bool thermalFault = false;
@@ -831,7 +831,24 @@ void setup() {
 
   loadSettings();
 
+  // 電流改用晶片內部參考電壓 (I_scale_analog = 0)，不再受模組 VREF 旋鈕影響：網頁設定多少，實際就是多少。
+  // 舊版受旋鈕縮放 (本機實測 VREF 1.423V，實際電流只有設定值的 0.57 倍)，
+  // 所以第一次升級時把已儲存的電流換算成相同的實際電流，避免一升級電流就變成約 1.76 倍
+  prefs.begin("motor", false);
+  if (!prefs.getBool("intref", false)) {
+    if (prefs.isKey("ma")) {
+      const float OLD_VREF_SCALE = 1.423f / 2.5f;
+      uint16_t ma = (uint16_t)(round(currentMA * OLD_VREF_SCALE / 50.0f) * 50);
+      currentMA = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
+      prefs.putUShort("ma", currentMA);
+      Serial.printf("Current reference changed to internal: stored current set to %u mA\n", currentMA);
+    }
+    prefs.putBool("intref", true);
+  }
+  prefs.end();
+
   driver.begin();
+  driver.I_scale_analog(false);
   driver.toff(4);
   driver.rms_current(currentMA);
   driver.microsteps(currentMicrostep); 

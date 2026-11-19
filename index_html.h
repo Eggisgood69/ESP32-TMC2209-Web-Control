@@ -247,7 +247,7 @@ function presetCancel() { clearTimeout(presetTimer); presetLongPressed = true; }
 
 // 實測：1000 mA 時馬達被卡住，負載讀值只降到約 40~57%，不會觸發卡住偵測；800 mA 時可在 1~2 秒內停機
 function showStallHint(ma) {
-  document.getElementById('ma_stall_hint').style.display = (ma > 800) ? 'block' : 'none';
+  document.getElementById('ma_stall_hint').style.display = (ma > 500) ? 'block' : 'none';
 }
 
 function handleCurrentInput(el) {
@@ -507,7 +507,7 @@ function applyStatus(o) {
   <div class='row'><span style='color:#a1a1aa; font-size:14px;'>Motor Status</span><span id='status_box'></span></div>
   <div class='stat-grid'>
     <div class='stat'><div class='diag-title'>Microstep</div><span id='ms_disp' class='ms-badge'>1 / 16</span></div>
-    <div class='stat'><div class='diag-title' title='Estimated from the driver current scale, assuming VREF &ge; 2.5 V. If the VREF pot on the module is set lower, the real current is lower.'>Driver Current (est.)</div><span id='cur_disp' class='live-val'>&mdash;</span></div>
+    <div class='stat'><div class='diag-title'>Driver Current</div><span id='cur_disp' class='live-val'>&mdash;</span></div>
     <div class='stat'><div class='diag-title'>Min Load Margin</div><span id='margin_disp' class='live-val'>&mdash;</span></div>
     <div class='stat'><div class='diag-title'>Timer Left</div><span id='t_disp' class='live-val' style='color:#ffb703;'>Continuous</span></div>
   </div>
@@ -570,8 +570,8 @@ function applyStatus(o) {
     <span class='field-unit'>mA RMS</span>
   </div>
   <div id='ma_err' class='field-err'></div>
-  <div class='field-hint'>About 0.7 &times; motor rated current. Change only while stopped. Actual current is lower if the module's VREF pot is below 2.5 V.</div>
-  <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Above 800 mA, stall detection may not trigger.</div>
+  <div class='field-hint'>About 0.7 &times; motor rated current. Change only while stopped.</div>
+  <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Above about 500 mA, stall detection may not trigger.</div>
   </div>
 
   <div class='field'>
