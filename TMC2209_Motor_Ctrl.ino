@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.14.0";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.14.1";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -48,7 +48,37 @@ const uint8_t STEALTH_PWM_REG = 1;
 
 WebServer server(80);
 const int stepPin = 14, dirPin = 12, enPin = 13;   
-TMC2209Stepper driver(&Serial2, RSENSE_VALUE, DRIVER_ADDRESS); 
+// TMCStepper 的 read() 會把 CRC 剛好為 0 的回覆當成錯誤，但 CRC 0 是合法值：
+// 每 256 種回覆就有一種讀不到。實際踩到的例子：450 mA 運轉時 DRV_STATUS = 0x400D0000，
+// 回覆的 CRC 正好是 0，每次讀取都失敗，3 秒後就誤判成 UART 斷線而停機。
+// 改用自己的 read()：檢查回覆開頭 (0x05 0xFF + 暫存器位址) 與 CRC，不再排除 CRC 0。
+// 沒有回覆時會讀到全 0，開頭檢查不會通過，仍然判定為錯誤
+class SafeTMC2209 : public TMC2209Stepper {
+  public:
+    SafeTMC2209(Stream *serial, float rsense, uint8_t addr) : TMC2209Stepper(serial, rsense, addr) {}
+  protected:
+    uint32_t read(uint8_t addr) override {
+      uint8_t request[4] = { TMC2208_SYNC, slave_address, (uint8_t)(addr | TMC_READ), 0x00 };
+      request[3] = calcCRC(request, 3);
+      for (uint8_t attempt = 0; attempt < max_retries; attempt++) {
+        preReadCommunication();
+        uint64_t out = _sendDatagram(request, 3, abort_window);
+        postReadCommunication();
+        delay(replyDelay);
+        uint8_t reply[8];
+        for (uint8_t i = 0; i < 8; i++) reply[i] = (uint8_t)(out >> (56 - 8 * i));
+        bool header = reply[0] == TMC2208_SYNC && reply[1] == 0xFF && reply[2] == (addr & 0x7F);
+        if (header && calcCRC(reply, 7) == reply[7]) {
+          CRCerror = false;
+          return (uint32_t)(out >> 8);
+        }
+      }
+      CRCerror = true;
+      return 0;
+    }
+};
+
+SafeTMC2209 driver(&Serial2, RSENSE_VALUE, DRIVER_ADDRESS);
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 FastAccelStepper *stepper = NULL;
 
@@ -190,9 +220,9 @@ void applyDriverMode(int microstep, bool spread) {
 const uint8_t CONFIG_WRITE_COUNT = 12;  // push() 寫 11 個暫存器 + 清除 GSTAT 1 筆
 uint8_t lastConfigWrites = 0;           // 最近一次設定時晶片收到的筆數 (顯示在 /diag)
 
-// 讀 IFCNT。TMCStepper 會把 CRC 剛好為 0 的回覆當成錯誤，而 IFCNT 的 256 個值中
-// 有一個的 CRC 是 0，停在那個值時永遠讀不到。所以讀失敗時送一筆無害的寫入
-// (TPWMTHRS = 0，和現行設定相同) 讓計數器前進後再讀一次；bumps 回報多寫了幾筆
+// 讀 IFCNT；讀失敗時 (例如通訊雜訊) 送一筆無害的寫入 (TPWMTHRS = 0，和現行設定相同)
+// 讓計數器前進後再讀一次，bumps 回報多寫了幾筆。
+// (原本是為了避開 CRC 為 0 的值；SafeTMC2209 已能讀取 CRC 0 的回覆，這裡保留當作備援)
 bool readIfcnt(uint8_t &value, uint8_t &bumps) {
   for (uint8_t i = 0; i < 2; i++) {
     value = driver.IFCNT();
@@ -661,7 +691,7 @@ String collectDiag(bool fullScan) {
   // 不再測試 RX/TX 對調：對調時 GPIO16 會變成輸出，且沒有經過 1k 電阻直接接在 UART 線上，
   // 可能和驅動器的輸出互相衝突
   for (uint8_t a = 0; a < 4; a++) {
-    TMC2209Stepper probe(&Serial2, RSENSE_VALUE, a);
+    SafeTMC2209 probe(&Serial2, RSENSE_VALUE, a);
     uint32_t v = probe.IOIN();
     snprintf(buf, sizeof(buf), "scan rx=16 tx=17 addr=%u: IOIN=0x%08lX crc_err=%d%s\n",
       a, (unsigned long)v, probe.CRCerror,
