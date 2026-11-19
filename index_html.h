@@ -400,7 +400,10 @@ function refreshStatus() {
 
 document.addEventListener("DOMContentLoaded", function() {
   refreshStatus();
-  setInterval(refreshStatus, 1000);
+  // 運轉中每 250 ms 更新 (卡住偵測、電流等即時數值)，停止時每 1 秒，減少不必要的請求
+  (function scheduleStatus() {
+    setTimeout(function() { refreshStatus(); scheduleStatus(); }, (lastState === true) ? 250 : 1000);
+  })();
 });
 
 function applyStatus(o) {
@@ -432,7 +435,9 @@ function applyStatus(o) {
     // 卡住偵測：監測中顯示目前負載讀值相對正常運轉的百分比 (越低代表越吃力)
     var stallEl = document.getElementById('diag_stall');
     if (o.stall === 'armed') {
-      stallEl.innerText = 'ON ' + Math.round(o.sg * 100 / Math.max(o.sg_base, 1)) + '%';
+      // 用 ESP32 停機判斷同一個值 (最近 6 次中第 3 低)，比單次讀值穩定，可直接對照 35% 門檻
+      var pct = (typeof o.sg_pct === 'number' && o.sg_pct >= 0) ? o.sg_pct : Math.round(o.sg * 100 / Math.max(o.sg_base, 1));
+      stallEl.innerText = 'ON ' + pct + '%';
       stallEl.className = 'diag-val status-on';
     } else if (o.stall === 'wait') {
       stallEl.innerText = 'CALIBRATING';

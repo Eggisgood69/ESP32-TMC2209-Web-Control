@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.8";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.9";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -89,6 +89,7 @@ uint16_t sgValue = 0;          // 最新的 SG_RESULT (越小代表負載越重)
 uint16_t sgBaseline = 0;       // 正常運轉時的平均值
 uint32_t sgSum = 0;
 uint8_t sgSamples = 0;
+int sgPct = -1;                // 網頁顯示的負載百分比：和停機判斷同一個值 (最近 6 次中第 3 低)，-1 = 未監測
 int sgMinPct = -1;             // 本次運轉中負載讀值的最低百分比 (最小餘裕)，-1 = 尚未開始監測
 int sgRecentPct[STALL_WINDOW];  // 最近幾次取樣的百分比，用來排除單次突波
 uint8_t sgRecentCount = 0;      // 視窗內已有幾筆 (最多 STALL_WINDOW)
@@ -356,6 +357,7 @@ void resetStallMonitor() {
   sgRecentCount = 0;
   sgRecentIdx = 0;
   if (stallState != STALL_TRIPPED) sgMinPct = -1;  // 卡住時保留最低值，方便查看
+  sgPct = -1;
 }
 
 // 每 50 ms 讀一次 SG_RESULT：到達目標轉速並穩定 1 秒後，取 1 秒平均為基準，之後讀值過低就停機
@@ -401,7 +403,7 @@ void monitorStall() {
   sgRecentPct[sgRecentIdx] = pct;
   sgRecentIdx = (sgRecentIdx + 1) % STALL_WINDOW;
   if (sgRecentCount < STALL_WINDOW) sgRecentCount++;
-  if (sgRecentCount < STALL_WINDOW) return;
+  if (sgRecentCount < STALL_WINDOW) { sgPct = pct; return; }  // 視窗還沒滿：先顯示單次值
 
   // 取視窗內第 STALL_CONFIRM_SAMPLES 小的值：它低於門檻，就代表至少有 3 次低於門檻。
   // 最小餘裕也用同一個值，畫面上的數字可直接對照門檻
@@ -409,6 +411,7 @@ void monitorStall() {
   memcpy(sorted, sgRecentPct, sizeof(sorted));
   std::sort(sorted, sorted + STALL_WINDOW);
   int sustained = sorted[STALL_CONFIRM_SAMPLES - 1];
+  sgPct = sustained;  // 顯示判斷用的值：比單次讀值穩定，也能直接對照 35% 門檻
   if (sgMinPct < 0 || sustained < sgMinPct) sgMinPct = sustained;
 
   if (sustained < STALL_RATIO * 100) {
@@ -606,6 +609,7 @@ void handleStatus() {
   json += "\"stall\":\"" + String(stallNames[stallState]) + "\",";
   json += "\"sg\":" + String(sgValue) + ",";
   json += "\"sg_base\":" + String(sgBaseline) + ",";
+  json += "\"sg_pct\":" + String(sgPct) + ",";
   // 接線警告欄也用來顯示「驅動器設定未確認」(短路警告優先)
   // 優先順序：安全監控未啟動 > 短路 > 設定未確認
   String alert = wiringAlert;
