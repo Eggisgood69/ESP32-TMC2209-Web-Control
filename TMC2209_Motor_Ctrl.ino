@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.4";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.5";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -235,9 +235,14 @@ void checkTMC2209Temperature() {
   if (driverWasReset || uartRecovered || !isDriverConfigured) {
     if (isDriverConfigured) Serial.println("⚠️ Driver power was lost -> re-applying settings");
     isDriverConfigured = false;  // 重新寫入並確認前禁止啟動
-    if (isRunning) {
-      // 設定已遺失 (微步不對，實際轉速會錯)，先停止，等重新設定後由使用者再啟動
-      stopMotor();
+    if (isRunning || (stepper && stepper->isRunning())) {
+      // 設定已遺失：驅動器回到腳位決定的微步 (1/8)，同樣的脈衝會讓馬達快好幾倍，
+      // 所以不減速、立即停止脈衝 (含按 STOP 後的減速途中)，並取消待切換的模式與計時器。
+      // 設定重新確認後由使用者再按 START
+      isRunning = false;
+      isMicrostepChangePending = false;
+      clearTimer();
+      if (stepper) stepper->forceStop();
     }
     // 等步進脈衝完全停止才重寫：減速途中改微步，轉速會突然跳動。
     // 還在減速時先跳過，下一秒的檢查會再試 (isDriverConfigured 仍為 false)
