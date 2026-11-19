@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.5";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.6";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -176,12 +176,28 @@ void applyDriverMode(int microstep, bool spread) {
   if (!isDriverConfigured && isRunning) stopMotor();  // 設定沒寫進驅動器，不啟動
 }
 
-// 依程式保存的副本重寫驅動器全部設定，並讀回 GCONF / CHOPCONF 確認。
+// 依程式保存的副本重寫驅動器全部設定，並確認晶片確實收到。
 // TMCStepper 每次寫入都是修改程式內的副本再整筆送出，副本一直是正確設定，
-// 所以驅動器重新上電後用 push() 就能完整還原
+// 所以驅動器重新上電後用 push() 就能完整還原。
+// 確認分兩步：
+//  1. IFCNT (晶片收到正確寫入的次數，8 位元、255 後回到 0) 的增量要等於這次寫入的筆數。
+//     電流 (IHOLD_IRUN) 等暫存器只能寫不能讀，只有這個方法能確認它們有收到
+//  2. 讀回 GCONF / CHOPCONF，確認微步、模式等內容正確
+const uint8_t CONFIG_WRITE_COUNT = 12;  // push() 寫 11 個暫存器 + 清除 GSTAT 1 筆
+uint8_t lastConfigWrites = 0;           // 最近一次設定時晶片收到的筆數 (顯示在 /diag)
+
 bool configureDriver() {
+  uint8_t before = driver.IFCNT();
+  if (driver.CRCerror) return false;
   driver.push();
   driver.GSTAT(0b111);  // 清除 reset 旗標：之後再看到它，就代表驅動器又重新上電過
+  uint8_t after = driver.IFCNT();
+  if (driver.CRCerror) return false;
+  lastConfigWrites = (uint8_t)(after - before);  // uint8_t 相減，自動處理 255 → 0 的回繞
+  if (lastConfigWrites != CONFIG_WRITE_COUNT) {
+    Serial.printf("Driver config: only %u of %u writes received\n", lastConfigWrites, CONFIG_WRITE_COUNT);
+    return false;
+  }
   uint32_t g = driver.GCONF();
   bool gOk = !driver.CRCerror;
   uint32_t c = driver.CHOPCONF();
@@ -599,10 +615,12 @@ String collectDiag(bool fullScan) {
     "DRV_STATUS=0x%08lX crc_err=%d\n"
     "GCONF=0x%08lX\n"
     "PWMCONF=0x%08lX (pwm_reg=%lu)\n"
-    "uart_fail_count=%u\n",
+    "uart_fail_count=%u\n"
+    "last config writes received=%u/%u\n",
     (unsigned long)ioin, (unsigned long)(ioin >> 24), ioinCrc,
     (unsigned long)drv, drvCrc, (unsigned long)gconf,
-    (unsigned long)pwmconf, (unsigned long)((pwmconf >> 24) & 0x0F), uartFailCount);
+    (unsigned long)pwmconf, (unsigned long)((pwmconf >> 24) & 0x0F), uartFailCount,
+    lastConfigWrites, CONFIG_WRITE_COUNT);
   String out = buf;
 
   // 運轉中或按 STOP 後仍在減速時，不做位址掃描與回音測試：
@@ -686,6 +704,12 @@ void handleAPI() {
     currentMA = ma;
     driver.rms_current(currentMA);
     markSettingsDirty();
+    // 電流暫存器無法讀回，用整批重寫 + 寫入計數確認晶片收到，確認後才回報成功
+    isDriverConfigured = configureDriver();
+    if (!isDriverConfigured) {
+      reply(503, "text/plain", "The driver did not confirm the new current. Retrying...");
+      return;
+    }
   }
   // 加減速時間運轉中也可修改，下方 updateMotorParameters() 會立即套用
   if (server.hasArg("ramp")) {
