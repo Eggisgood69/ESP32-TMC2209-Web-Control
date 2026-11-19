@@ -317,7 +317,10 @@ var rpmEditUntil = 0, dirEditUntil = 0;
 function send(p, v){
   if (p === 'rpm') rpmEditUntil = Date.now() + 2000;
   if (p === 'dir') dirEditUntil = Date.now() + 2000;
-  var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + v, true); x.send(); } 
+  var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + v, true);
+  // 倒數超過上限時 ESP32 會拒絕，顯示原因
+  x.onload = function(){ if (x.status !== 200 && p.charAt(0) === 't') alert(x.responseText); };
+  x.send(); }
 
 function showDirection(dir) {
   document.getElementById('btn_cw').classList.toggle('active', dir === 1);
@@ -543,7 +546,7 @@ function applyStatus(o) {
 
   <span class='label-text'>Auto Shutdown Timer</span>
   <div class='timer-container'>
-    <input type='number' id='t_h' min='0' placeholder='Hr' onchange='send("t_h",this.value)'>
+    <input type='number' id='t_h' min='0' max='999' placeholder='Hr' onchange='send("t_h",this.value)'>
     <input type='number' id='t_m' min='0' placeholder='Min' onchange='send("t_m",this.value)'>
     <input type='number' id='t_s' min='0' placeholder='Sec' onchange='send("t_s",this.value)'>
   </div>

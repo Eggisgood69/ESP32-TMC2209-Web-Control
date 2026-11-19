@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.13.7";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.13.8";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -71,6 +71,9 @@ uint8_t uartFailCount = 0;   // 連續 UART 失敗次數，避免單次雜訊誤
 bool isDriverConfigured = false;
 bool isSafetyTaskRunning = false;   // 安全監控任務建立成功；失敗時禁止啟動 (沒有卡住偵測與故障停機)
 const char* SAFETY_TASK_FAILED_MSG = "Safety monitor failed to start. Restart the device.";
+const char* STEPPER_FAILED_MSG = "Step generator failed to start. Restart the device.";
+// 倒數上限 999 時 59 分 59 秒：換成毫秒 (約 36 億) 仍在 32 位元範圍內 (約 1193 小時)
+const uint32_t MAX_TIMER_SEC = 999UL * 3600 + 59 * 60 + 59;
 const char* DRIVER_NOT_CONFIGURED_MSG = "Driver settings not confirmed (driver power lost or UART error). Retrying...";
 bool isStealthActive = true; // 驅動器實際模式 (DRV_STATUS bit30)，由溫度檢查一併更新
 
@@ -579,8 +582,12 @@ void handleRoot() {
 void handleStatus() {
   String t_str = "Continuous";
   if (timerDuration > 0) {
-    long r = isRunning ? ((long)timerDuration - (millis() - timerStartHour)) / 1000 : timerDuration / 1000;
-    if (r < 0) r = 0;
+    unsigned long remainMs = timerDuration;
+    if (isRunning) {
+      unsigned long elapsed = millis() - timerStartHour;
+      remainMs = (elapsed >= timerDuration) ? 0 : timerDuration - elapsed;
+    }
+    long r = remainMs / 1000;
     convertStepsToTimeStr(r, t_str);
   }
 
@@ -604,6 +611,7 @@ void handleStatus() {
   String alert = wiringAlert;
   int alertLevel = wiringLevel;
   if (!isSafetyTaskRunning) { alert = SAFETY_TASK_FAILED_MSG; alertLevel = 2; }
+  else if (!stepper) { alert = STEPPER_FAILED_MSG; alertLevel = 2; }
   else if (!isDriverConfigured && wiringLevel != 2) { alert = DRIVER_NOT_CONFIGURED_MSG; alertLevel = 2; }
   json += "\"wiring\":\"" + alert + "\",";
   json += "\"wiring_level\":" + String(alertLevel) + ",";
@@ -704,6 +712,21 @@ void handleAPI() {
     reply(200, "text/plain", String(presetRpm[i], 1));
     return;
   }
+
+  // 倒數計時：先用 64 位元檢查總長度，避免換算成毫秒時溢位 (例如 1200 小時會變成約 7 小時)
+  bool timerArg = server.hasArg("t_h") || server.hasArg("t_m") || server.hasArg("t_s");
+  long newH = tempHour, newM = tempMin, newS = tempSec;
+  if (timerArg) {
+    if (server.hasArg("t_h")) newH = max(0L, server.arg("t_h").toInt());
+    if (server.hasArg("t_m")) newM = max(0L, server.arg("t_m").toInt());
+    if (server.hasArg("t_s")) newS = max(0L, server.arg("t_s").toInt());
+    uint64_t totalSec = (uint64_t)newH * 3600 + (uint64_t)newM * 60 + (uint64_t)newS;
+    if (totalSec > MAX_TIMER_SEC) {
+      reply(400, "text/plain", "Timer must be at most 999 h 59 m 59 s");
+      return;
+    }
+  }
+
   if (server.hasArg("ma")) {
     long ma = server.arg("ma").toInt();
     if (ma < MIN_CURRENT_MA || ma > MAX_CURRENT_MA) {
@@ -741,14 +764,14 @@ void handleAPI() {
   }
   if (server.hasArg("rpm") || server.hasArg("dir")) markSettingsDirty();
   if (server.hasArg("dir")) targetDirection = (server.arg("dir").toInt() == -1) ? -1 : 1;
-  if (server.hasArg("t_h")) tempHour = max(0L, server.arg("t_h").toInt());
-  if (server.hasArg("t_m")) tempMin = max(0L, server.arg("t_m").toInt());
-  if (server.hasArg("t_s")) tempSec = max(0L, server.arg("t_s").toInt());
-  if (server.hasArg("t_h") || server.hasArg("t_m") || server.hasArg("t_s")) {
-    timerDuration = (unsigned long)(tempHour * 3600 + tempMin * 60 + tempSec) * 1000;
+  if (timerArg) {
+    tempHour = newH; tempMin = newM; tempSec = newS;
+    timerDuration = ((unsigned long)tempHour * 3600 + (unsigned long)tempMin * 60 + (unsigned long)tempSec) * 1000UL;
     if (isRunning && timerDuration > 0) timerStartHour = millis();
   }
-  updateMotorParameters();
+  // 只有轉速、轉向、加減速時間改變時才重新套用馬達參數：
+  // 套用時會重設卡住偵測的基準，只改倒數時不該讓監測中斷
+  if (server.hasArg("rpm") || server.hasArg("dir") || server.hasArg("ramp")) updateMotorParameters();
   reply(200, "text/plain", "OK");
 }
 
@@ -757,8 +780,17 @@ void handleStart() {
     reply(503, "text/plain", SAFETY_TASK_FAILED_MSG);
     return;
   }
+  if (!stepper) {  // 步進引擎沒建立：無法輸出 STEP 脈衝，不能顯示成運轉中
+    reply(503, "text/plain", STEPPER_FAILED_MSG);
+    return;
+  }
   if (isDriverFault || !isDriverConfigured) {
     reply(503, "text/plain", isDriverConfigured ? faultMessage : String(DRIVER_NOT_CONFIGURED_MSG));
+    return;
+  }
+  // 已在運轉中：不重設倒數起點 (否則會延後停機) 也不重新校準卡住偵測
+  if (isRunning) {
+    reply(200, "text/plain", "Already running");
     return;
   }
   // START 一律使用裝置目前的目標轉速，不接受網頁帶來的 rpm：
