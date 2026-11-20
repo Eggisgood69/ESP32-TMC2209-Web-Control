@@ -571,7 +571,7 @@ function applyStatus(o) {
   </div>
   <div id='ma_err' class='field-err'></div>
   <div class='field-hint'>About 0.7 &times; motor rated current. Change only while stopped.</div>
-  <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Stall detection was tested up to 800 mA; above that it may not trigger.</div>
+  <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Above 800 mA, stall detection is less sensitive (tested to 1000 mA: it needs a firmer jam to stop).</div>
   </div>
 
   <div class='field'>
