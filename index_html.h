@@ -247,7 +247,7 @@ function presetCancel() { clearTimeout(presetTimer); presetLongPressed = true; }
 
 // 實測：1000 mA 時馬達被卡住，負載讀值只降到約 40~57%，不會觸發卡住偵測；800 mA 時可在 1~2 秒內停機
 function showStallHint(ma) {
-  document.getElementById('ma_stall_hint').style.display = (ma > 500) ? 'block' : 'none';
+  document.getElementById('ma_stall_hint').style.display = (ma > 800) ? 'block' : 'none';
 }
 
 function handleCurrentInput(el) {
@@ -571,7 +571,7 @@ function applyStatus(o) {
   </div>
   <div id='ma_err' class='field-err'></div>
   <div class='field-hint'>About 0.7 &times; motor rated current. Change only while stopped.</div>
-  <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Above about 500 mA, stall detection may not trigger.</div>
+  <div id='ma_stall_hint' class='field-hint field-warn' style='display: none;'>Stall detection was tested up to 800 mA; above that it may not trigger.</div>
   </div>
 
   <div class='field'>
