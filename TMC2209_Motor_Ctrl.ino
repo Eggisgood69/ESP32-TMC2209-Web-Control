@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.14.4";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.14.5";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -18,7 +18,9 @@ const char* ap_password = SECRET_AP_PASSWORD;   // 定義於 secrets.h
 
 const float RSENSE_VALUE = 0.11f;        // 驅動器感測電阻值 (TMC2209 通常為 0.11)
 const uint8_t DRIVER_ADDRESS = 0;        // UART 設備位址 (MS1, MS2 皆接地或浮空為 0)
-const uint16_t DEFAULT_CURRENT_MA = 800; // 預設運轉電流 (mA)，可在網頁上修改並儲存
+// 預設運轉電流 (mA)，可在網頁上修改並儲存。
+// 設得保守：從未存過設定的舊機無法和全新燒錄區分，舊版實際約 455 mA (800 × 1.423V ÷ 2.5V)，升級後不會突然變大
+const uint16_t DEFAULT_CURRENT_MA = 450;
 const uint16_t MIN_CURRENT_MA = 200;     // 網頁可設定的電流範圍 (RMS)
 const uint16_t MAX_CURRENT_MA = 1200;    // 小型 TMC2209 模組散熱有限，長時間超過約 1.2A 容易過熱
 const int MOTOR_STEPS_PER_REV = 200;     // 馬達每圈步數 (1.8度)
@@ -638,6 +640,8 @@ void handleStatus() {
   json += "\"sg\":" + String(sgValue) + ",";
   json += "\"sg_base\":" + String(sgBaseline) + ",";
   json += "\"sg_pct\":" + String(sgPct) + ",";
+  // 目前的倒數設定：網頁輸入被拒絕時還原成這個值 (另一個分頁改過也能對上)
+  json += "\"t_h\":" + String(tempHour) + ",\"t_m\":" + String(tempMin) + ",\"t_s\":" + String(tempSec) + ",";
   // 接線警告欄也用來顯示「驅動器設定未確認」(短路警告優先)
   // 優先順序：安全監控未啟動 > 短路 > 設定未確認
   String alert = wiringAlert;
@@ -882,9 +886,12 @@ void setup() {
   //  - 更舊的版本 (曾存過任何設定)：舊版實際電流 = 設定值 × (VREF ÷ 2.5V)。
   //    VREF 依模組旋鈕而不同，這裡用本機實測的 1.423V 估算；其他模組升級後請自行確認電流
   //  - 全新燒錄 (沒有任何設定)：使用預設值
+  // 換算結果直接使用，不從 Flash 讀回：寫入失敗時也不會退回預設值，下次開機會再換算並重寫一次
   prefs.begin("motor", false);
-  if (!prefs.isKey("mai")) {
-    uint16_t ma = DEFAULT_CURRENT_MA;
+  uint16_t ma = DEFAULT_CURRENT_MA;
+  if (prefs.isKey("mai")) {
+    ma = prefs.getUShort("mai", DEFAULT_CURRENT_MA);
+  } else {
     if (prefs.getBool("intref", false)) {
       ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
     } else if (prefs.isKey("ma") || prefs.isKey("rpm") || prefs.isKey("dir") || prefs.isKey("ramp")) {
@@ -893,9 +900,10 @@ void setup() {
       ma = (uint16_t)(round(oldMa * OLD_VREF_SCALE / 50.0f) * 50);
       Serial.printf("Upgraded to internal current reference: %u mA (VREF-scaled) -> %u mA\n", oldMa, ma);
     }
-    prefs.putUShort("mai", constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA));
+    ma = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
+    if (prefs.putUShort("mai", ma) == 0) Serial.println("WARNING: failed to save migrated current, will retry next boot");
   }
-  currentMA = constrain(prefs.getUShort("mai", DEFAULT_CURRENT_MA), MIN_CURRENT_MA, MAX_CURRENT_MA);
+  currentMA = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
   prefs.end();
   Serial.printf("Motor current: %u mA\n", currentMA);
 

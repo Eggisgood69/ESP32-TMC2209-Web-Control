@@ -314,12 +314,13 @@ function handleRpmInput(el) {
 }
 
 // 剛在本頁調整轉速/轉向後短時間內，不讓 /status 的同步蓋掉 (送出前讀到的舊值會讓畫面跳回去)
-var rpmEditUntil = 0, dirEditUntil = 0;
-// 倒數欄位最後一次被裝置接受的值：被拒絕時把輸入框改回這個值，和裝置保持一致
+var rpmEditUntil = 0, dirEditUntil = 0, timerEditUntil = 0;
+// 裝置目前的倒數設定 (由 /status 同步，含其他分頁的修改)：輸入被拒絕時把輸入框改回這個值
 var timerPrev = { t_h: '', t_m: '', t_s: '' };
 function send(p, v){
   if (p === 'rpm') rpmEditUntil = Date.now() + 2000;
   if (p === 'dir') dirEditUntil = Date.now() + 2000;
+  if (p in timerPrev) timerEditUntil = Date.now() + 2000;  // 等這次修改的結果，避免舊的狀態覆蓋
   var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + encodeURIComponent(v), true);
   x.onload = function(){
     if (!(p in timerPrev)) return;
@@ -475,6 +476,11 @@ function applyStatus(o) {
     wEl.innerText = o.wiring ? ((o.wiring_level === 2 ? '⛔ ' : '⚠️ ') + o.wiring) : '';
     wEl.className = 'wiring-alert' + (o.wiring_level === 2 ? ' fault' : o.wiring_level === 1 ? ' warn' : '');
     
+    // 同步裝置目前的倒數設定 (剛送出修改的 2 秒內先不覆蓋)
+    if (o.t_h !== undefined && Date.now() > timerEditUntil) {
+      ['t_h', 't_m', 't_s'].forEach(function(k){ timerPrev[k] = o[k] > 0 ? String(o[k]) : ''; });
+    }
+
     if (o.running !== lastState) {
       renderRunState(o.running);
       // 停止時 ESP32 會清除計時器，畫面上的時/分/秒也一起清空
