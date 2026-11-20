@@ -195,6 +195,7 @@ document.addEventListener("DOMContentLoaded", function() {
   if (st.dir === 1 || st.dir === -1) showDirection(st.dir);
   ['t_h', 't_m', 't_s'].forEach(function(k) {
     if (st[k] > 0) document.getElementById(k).value = st[k];
+    timerPrev[k] = document.getElementById(k).value;
   });
   if (st.ma > 0) { document.getElementById('ma_input').value = st.ma; showStallHint(st.ma); }
   if (st.ramp > 0) document.getElementById('ramp_input').value = st.ramp;
@@ -314,12 +315,19 @@ function handleRpmInput(el) {
 
 // 剛在本頁調整轉速/轉向後短時間內，不讓 /status 的同步蓋掉 (送出前讀到的舊值會讓畫面跳回去)
 var rpmEditUntil = 0, dirEditUntil = 0;
+// 倒數欄位最後一次被裝置接受的值：被拒絕時把輸入框改回這個值，和裝置保持一致
+var timerPrev = { t_h: '', t_m: '', t_s: '' };
 function send(p, v){
   if (p === 'rpm') rpmEditUntil = Date.now() + 2000;
   if (p === 'dir') dirEditUntil = Date.now() + 2000;
-  var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + v, true);
-  // 倒數超過上限時 ESP32 會拒絕，顯示原因
-  x.onload = function(){ if (x.status !== 200 && p.charAt(0) === 't') alert(x.responseText); };
+  var x = new XMLHttpRequest(); x.open('GET', '/api?' + p + '=' + encodeURIComponent(v), true);
+  x.onload = function(){
+    if (!(p in timerPrev)) return;
+    if (x.status === 200) { timerPrev[p] = v; return; }
+    // 倒數格式錯誤或超過上限：顯示原因，並把輸入框還原成裝置目前的值
+    alert(x.responseText);
+    document.getElementById(p).value = timerPrev[p];
+  };
   x.send(); }
 
 function showDirection(dir) {
@@ -471,7 +479,7 @@ function applyStatus(o) {
       renderRunState(o.running);
       // 停止時 ESP32 會清除計時器，畫面上的時/分/秒也一起清空
       if (lastState === true && !o.running) {
-        ['t_h', 't_m', 't_s'].forEach(function(k){ document.getElementById(k).value = ''; });
+        ['t_h', 't_m', 't_s'].forEach(function(k){ document.getElementById(k).value = ''; timerPrev[k] = ''; });
       }
     }
     lastState = o.running;

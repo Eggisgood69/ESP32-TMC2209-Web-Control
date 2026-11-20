@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.14.3";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.14.4";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -153,7 +153,6 @@ void loadSettings() {
   prefs.begin("motor", true);
   float rpm = prefs.getFloat("rpm", targetRPM);
   int dir = prefs.getInt("dir", targetDirection);
-  uint16_t ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
   float ramp = prefs.getFloat("ramp", DEFAULT_RAMP_SEC);
   for (int i = 0; i < PRESET_COUNT; i++) {
     float p = prefs.getFloat(("p" + String(i)).c_str(), presetRpm[i]);
@@ -163,9 +162,8 @@ void loadSettings() {
 
   if (rpm > 0.0f) targetRPM = constrain(rpm, MIN_ALLOWED_RPM, MAX_ALLOWED_RPM);
   targetDirection = (dir == -1) ? -1 : 1;
-  currentMA = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
   if (ramp > 0.0f) rampSec = constrain(ramp, MIN_RAMP_SEC, MAX_RAMP_SEC);
-  Serial.printf("Settings loaded: %.1f RPM, dir %d, %u mA, ramp %.1f s\n", targetRPM, targetDirection, currentMA, rampSec);
+  Serial.printf("Settings loaded: %.1f RPM, dir %d, ramp %.1f s\n", targetRPM, targetDirection, rampSec);
 }
 
 void markSettingsDirty() {
@@ -181,7 +179,7 @@ void saveSettingsIfDue() {
   prefs.begin("motor", false);
   prefs.putFloat("rpm", targetRPM);
   prefs.putInt("dir", targetDirection);
-  prefs.putUShort("ma", currentMA);
+  prefs.putUShort("mai", currentMA);  // 內部參考電壓下的電流 (舊鍵 "ma" 保持不動，見 setup())
   prefs.putFloat("ramp", rampSec);
   for (int i = 0; i < PRESET_COUNT; i++) prefs.putFloat(("p" + String(i)).c_str(), presetRpm[i]);
   prefs.end();
@@ -732,6 +730,20 @@ bool parseRpmArg() {
   return true;
 }
 
+// 讀取倒數欄位：沒有這個參數時保留原值；空白視為 0；其他只接受 1 ~ 7 位數字
+bool parseTimerArg(const char* name, long &out) {
+  if (!server.hasArg(name)) return true;
+  String v = server.arg(name);
+  v.trim();
+  if (v.length() == 0) { out = 0; return true; }
+  if (v.length() > 7) return false;
+  for (unsigned int i = 0; i < v.length(); i++) {
+    if (!isDigit(v[i])) return false;
+  }
+  out = v.toInt();
+  return true;
+}
+
 void handleAPI() {
   // 儲存快捷鍵：/api?preset=0&set=150
   if (server.hasArg("preset")) {
@@ -751,9 +763,11 @@ void handleAPI() {
   bool timerArg = server.hasArg("t_h") || server.hasArg("t_m") || server.hasArg("t_s");
   long newH = tempHour, newM = tempMin, newS = tempSec;
   if (timerArg) {
-    if (server.hasArg("t_h")) newH = max(0L, server.arg("t_h").toInt());
-    if (server.hasArg("t_m")) newM = max(0L, server.arg("t_m").toInt());
-    if (server.hasArg("t_s")) newS = max(0L, server.arg("t_s").toInt());
+    // 只接受空白 (= 0) 或 0 ~ 7 位數的正整數：toInt() 會把 "0.5" 當成 0、"1e2" 當成 1 卻回報成功
+    if (!parseTimerArg("t_h", newH) || !parseTimerArg("t_m", newM) || !parseTimerArg("t_s", newS)) {
+      reply(400, "text/plain", "Timer values must be whole numbers");
+      return;
+    }
     uint64_t totalSec = (uint64_t)newH * 3600 + (uint64_t)newM * 60 + (uint64_t)newS;
     if (totalSec > MAX_TIMER_SEC) {
       reply(400, "text/plain", "Timer must be at most 999 h 59 m 59 s");
@@ -862,20 +876,28 @@ void setup() {
   loadSettings();
 
   // 電流改用晶片內部參考電壓 (I_scale_analog = 0)，不再受模組 VREF 旋鈕影響：網頁設定多少，實際就是多少。
-  // 舊版受旋鈕縮放 (本機實測 VREF 1.423V，實際電流只有設定值的 0.57 倍)，
-  // 所以第一次升級時把已儲存的電流換算成相同的實際電流，避免一升級電流就變成約 1.76 倍
+  // 電流存在新鍵 "mai"；舊版的 "ma" 是「受旋鈕縮放前」的設定值，永遠不改寫。
+  // 升級時只在 "mai" 不存在時換算一次，且一律從原始的 "ma" 算，中途斷電重來也不會重複縮小。
+  //  - v1.14.0 ~ v1.14.3 (有 "intref" 標記)："ma" 已經是內部參考下的值，直接沿用
+  //  - 更舊的版本 (曾存過任何設定)：舊版實際電流 = 設定值 × (VREF ÷ 2.5V)。
+  //    VREF 依模組旋鈕而不同，這裡用本機實測的 1.423V 估算；其他模組升級後請自行確認電流
+  //  - 全新燒錄 (沒有任何設定)：使用預設值
   prefs.begin("motor", false);
-  if (!prefs.getBool("intref", false)) {
-    if (prefs.isKey("ma")) {
+  if (!prefs.isKey("mai")) {
+    uint16_t ma = DEFAULT_CURRENT_MA;
+    if (prefs.getBool("intref", false)) {
+      ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
+    } else if (prefs.isKey("ma") || prefs.isKey("rpm") || prefs.isKey("dir") || prefs.isKey("ramp")) {
       const float OLD_VREF_SCALE = 1.423f / 2.5f;
-      uint16_t ma = (uint16_t)(round(currentMA * OLD_VREF_SCALE / 50.0f) * 50);
-      currentMA = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
-      prefs.putUShort("ma", currentMA);
-      Serial.printf("Current reference changed to internal: stored current set to %u mA\n", currentMA);
+      uint16_t oldMa = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
+      ma = (uint16_t)(round(oldMa * OLD_VREF_SCALE / 50.0f) * 50);
+      Serial.printf("Upgraded to internal current reference: %u mA (VREF-scaled) -> %u mA\n", oldMa, ma);
     }
-    prefs.putBool("intref", true);
+    prefs.putUShort("mai", constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA));
   }
+  currentMA = constrain(prefs.getUShort("mai", DEFAULT_CURRENT_MA), MIN_CURRENT_MA, MAX_CURRENT_MA);
   prefs.end();
+  Serial.printf("Motor current: %u mA\n", currentMA);
 
   driver.begin();
   driver.I_scale_analog(false);
