@@ -2,7 +2,7 @@
 
 用 ESP32 + TMC2209 做的步進馬達網頁控制面板。連上 ESP32 的 Wi-Fi 熱點，就能用手機或電腦控制。
 
-<img width="800" alt="控制面板畫面 (FW v1.14.5)" src="docs/screenshot.png" />
+<img width="800" alt="控制面板畫面 (FW v1.15.0)" src="docs/screenshot.png" />
 
 ---
 
