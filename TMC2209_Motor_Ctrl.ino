@@ -9,7 +9,7 @@
 #include <Preferences.h> // 轉速、轉向、電流存在 Flash (NVS)，斷電後保留
 
 // =================【 韌體版本 】=================
-const char* FW_VERSION = "v1.14.5";       // 每次更新韌體時請遞增
+const char* FW_VERSION = "v1.15.0";       // 每次更新韌體時請遞增
 const char* FW_BUILD   = __DATE__ " " __TIME__; // 編譯時間 (自動產生)
 
 // =================【 自發 Wi-Fi 熱點與硬體常數設定 】=================
@@ -32,9 +32,10 @@ const float DEFAULT_RAMP_SEC = 5.0;
 const float MIN_RAMP_SEC = 0.2;
 const float MAX_RAMP_SEC = 10.0;
 // 超過此轉速改用 1/16 微步 + SpreadCycle (在停止時切換)。
-// 實測 (24V, 800~900 mA)：StealthChop 在約 150 RPM 以上會無負載自己失步並發出異音，
-// 調電流、加減速時間、PWM_REG 都只能減輕，所以界線設在 130，與失步區保留約 20 RPM 餘裕
-const float SPREADCYCLE_RPM_THRESHOLD = 130.0;
+// 早期 (外部參考電壓、驅動器設定未確認寫入) 在約 150 RPM 會失步，界線曾設 130。
+// v1.15.0 重新實測 (24V, 內部參考電壓)：450 / 800 mA 在 130~180 RPM 都穩定安靜，170 RPM 各跑 3 分鐘無失步，
+// 所以界線改為 170，與測到的最高 180 RPM 保留 10 RPM 餘裕
+const float SPREADCYCLE_RPM_THRESHOLD = 170.0;
 // 卡住偵測 (StallGuard4)：只在 StealthChop 且轉速足夠時有效，低速時馬達反電動勢太小、讀值不可靠
 const float STALL_MIN_RPM = 30.0;
 const float STALL_RATIO = 0.35;          // 負載讀值掉到基準值的 35% 以下視為卡住 (數值越大越敏感)
