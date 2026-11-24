@@ -168,6 +168,35 @@ void loadSettings() {
   Serial.printf("Settings loaded: %.1f RPM, dir %d, ramp %.1f s\n", targetRPM, targetDirection, rampSec);
 }
 
+// 電流改用晶片內部參考電壓 (I_scale_analog = 0)，不再受模組 VREF 旋鈕影響：網頁設定多少，實際就是多少。
+// 電流存在新鍵 "mai"；舊版的 "ma" 是「受旋鈕縮放前」的設定值，永遠不改寫。
+// 升級時只在 "mai" 不存在時換算一次，且一律從原始的 "ma" 算，中途斷電重來也不會重複縮小。
+//  - v1.14.0 ~ v1.14.3 (有 "intref" 標記)："ma" 已經是內部參考下的值，直接沿用
+//  - 更舊的版本 (曾存過任何設定)：舊版實際電流 = 設定值 × (VREF ÷ 2.5V)。
+//    VREF 依模組旋鈕而不同，這裡用本機實測的 1.423V 估算；其他模組升級後請自行確認電流
+//  - 全新燒錄 (沒有任何設定)：使用預設值
+// 換算結果直接使用，不從 Flash 讀回：寫入失敗時也不會退回預設值，下次開機會再換算並重寫一次
+uint16_t loadCurrentSetting(const char* ns) {
+  prefs.begin(ns, false);
+  uint16_t ma = DEFAULT_CURRENT_MA;
+  if (prefs.isKey("mai")) {
+    ma = prefs.getUShort("mai", DEFAULT_CURRENT_MA);
+  } else {
+    if (prefs.getBool("intref", false)) {
+      ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
+    } else if (prefs.isKey("ma") || prefs.isKey("rpm") || prefs.isKey("dir") || prefs.isKey("ramp")) {
+      const float OLD_VREF_SCALE = 1.423f / 2.5f;
+      uint16_t oldMa = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
+      ma = (uint16_t)(round(oldMa * OLD_VREF_SCALE / 50.0f) * 50);
+      Serial.printf("Upgraded to internal current reference: %u mA (VREF-scaled) -> %u mA\n", oldMa, ma);
+    }
+    ma = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
+    if (prefs.putUShort("mai", ma) == 0) Serial.println("WARNING: failed to save migrated current, will retry next boot");
+  }
+  prefs.end();
+  return constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
+}
+
 void markSettingsDirty() {
   isSettingsDirty = true;
   settingsChangedAt = millis();
@@ -879,32 +908,7 @@ void setup() {
 
   loadSettings();
 
-  // 電流改用晶片內部參考電壓 (I_scale_analog = 0)，不再受模組 VREF 旋鈕影響：網頁設定多少，實際就是多少。
-  // 電流存在新鍵 "mai"；舊版的 "ma" 是「受旋鈕縮放前」的設定值，永遠不改寫。
-  // 升級時只在 "mai" 不存在時換算一次，且一律從原始的 "ma" 算，中途斷電重來也不會重複縮小。
-  //  - v1.14.0 ~ v1.14.3 (有 "intref" 標記)："ma" 已經是內部參考下的值，直接沿用
-  //  - 更舊的版本 (曾存過任何設定)：舊版實際電流 = 設定值 × (VREF ÷ 2.5V)。
-  //    VREF 依模組旋鈕而不同，這裡用本機實測的 1.423V 估算；其他模組升級後請自行確認電流
-  //  - 全新燒錄 (沒有任何設定)：使用預設值
-  // 換算結果直接使用，不從 Flash 讀回：寫入失敗時也不會退回預設值，下次開機會再換算並重寫一次
-  prefs.begin("motor", false);
-  uint16_t ma = DEFAULT_CURRENT_MA;
-  if (prefs.isKey("mai")) {
-    ma = prefs.getUShort("mai", DEFAULT_CURRENT_MA);
-  } else {
-    if (prefs.getBool("intref", false)) {
-      ma = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
-    } else if (prefs.isKey("ma") || prefs.isKey("rpm") || prefs.isKey("dir") || prefs.isKey("ramp")) {
-      const float OLD_VREF_SCALE = 1.423f / 2.5f;
-      uint16_t oldMa = prefs.getUShort("ma", DEFAULT_CURRENT_MA);
-      ma = (uint16_t)(round(oldMa * OLD_VREF_SCALE / 50.0f) * 50);
-      Serial.printf("Upgraded to internal current reference: %u mA (VREF-scaled) -> %u mA\n", oldMa, ma);
-    }
-    ma = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
-    if (prefs.putUShort("mai", ma) == 0) Serial.println("WARNING: failed to save migrated current, will retry next boot");
-  }
-  currentMA = constrain(ma, MIN_CURRENT_MA, MAX_CURRENT_MA);
-  prefs.end();
+  currentMA = loadCurrentSetting("motor");  // 必要時從舊版設定換算一次，見 loadCurrentSetting()
   Serial.printf("Motor current: %u mA\n", currentMA);
 
   driver.begin();
